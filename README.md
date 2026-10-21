@@ -6,16 +6,29 @@
 
 ## 下载
 
-**Windows 单文件版（免安装 Python）**：[Releases › v0.1.0](https://github.com/luanxing10086/mcdonloader/releases/latest) → `mcdl.exe`
+**Windows 图形界面版（推荐）**：[Releases › v0.1.0](https://github.com/luanxing10086/mcdonloader/releases/latest) → `mcdl-gui.exe`
 
+**命令行版**：同页面的 `mcdl.exe`
+
+双击 `mcdl-gui.exe` 即开窗口：左边选版本、右边选加载器，底部设目录/下载源，点“开始下载”。
+
+## 图形界面
+
+![界面](docs/gui.png)
+
+- **版本列表**：从 Mojang / BMCLAPI 拉取，支持“正式版 / 快照 / 全部”过滤和关键字搜索，双击某行直接开始
+- **加载器**：无 / Fabric / Quilt / Forge / NeoForge，选中后自动联网列出该游戏版本可用的加载器版本，默认“自动（推荐）”
+- **整合包**：另一个标签页，填 Modrinth slug、页面链接或选本地 `.mrpack`
+- **下载选项**：安装目录、官方源 / BMCLAPI、跳过 assets、并发数
+- **日志与进度**：实时显示每个文件的下载进度，完成后可直接打开目录
+
+界面用 tkinter（Python 标准库），不引入任何第三方依赖。
+
+## 从源码运行 GUI
+
+```bash
+python -m mcdl.gui
 ```
-mcdl.exe doctor
-mcdl.exe install 1.20.1 --mirror bmclapi
-```
-
-SHA256 见 release 说明。若企业环境的安全软件拦截单文件自解压，可改用源码运行（见下）。
-
-双击 `mcdl.exe` 而不带参数时，会显示帮助并等待回车——这是有意为之，否则控制台窗口会一闪而过。
 
 ## 能下什么
 

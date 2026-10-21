@@ -21,6 +21,7 @@ classifiers = [
 
 [project.scripts]
 mcdl = "mcdl.cli:main"
+mcdl-gui = "mcdl.gui:main"
 
 [project.urls]
 Homepage = "https://github.com/mcdonloader/mcdonloader"
