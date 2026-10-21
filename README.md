@@ -4,6 +4,17 @@
 
 起因是 PCL 在最近一次更新里禁用了“下载 Minecraft 本体”。这个项目参照 PCL 的下载源策略与目录规范，用纯 Python 标准库重新实现了一遍下载链路——不依赖 PCL、不依赖任何第三方包。
 
+## 下载
+
+**Windows 单文件版（免安装 Python）**：[Releases › v0.1.0](https://github.com/luanxing10086/mcdonloader/releases/latest) → `mcdl.exe`
+
+```
+mcdl.exe doctor
+mcdl.exe install 1.20.1 --mirror bmclapi
+```
+
+SHA256 见 release 说明。若企业环境的安全软件拦截单文件自解压，可改用源码运行（见下）。
+
 ## 能下什么
 
 | 类型 | 说明 |
@@ -77,6 +88,15 @@ mcdl install 1.20.1 --loader fabric
 | `--json` | 机器可读输出 |
 | `--refresh` | 忽略 1 小时的版本清单缓存 |
 
+## 从源码打包 exe
+
+```bash
+pip install pyinstaller
+pyinstaller --onefile --console --name mcdl --paths . tools/mcdl_entry.py
+```
+
+产物在 `dist/mcdl.exe`（Windows）/ `dist/mcdl`（Linux、macOS）。约 8.6 MB，运行时自解压到临时目录。
+
 ## 落盘结构
 
 完全遵循官方 launcher 规范，可以被任何启动器（PCL、HMCL、Prism、官方启动器）直接识别：
@@ -139,6 +159,8 @@ python -m unittest discover -s tests -v
 | `modpack fabulously-optimized` | ✅ MC 26.2 + Fabric 0.19.5，51 个文件 + 57 个 overrides |
 | NeoForge 版本解析 | ✅ 1.21.1→`21.1.264`，26.3→`26.3.0.94`（新旧两套版本号都支持） |
 | NeoForge 完整安装 | ❌ 本机失败：`maven.neoforged.net` 不可达，且 BMCLAPI 只代理部分 `net.neoforged` 制品（其余 403） |
+
+打包后的 `mcdl.exe` 同样实测过：`--version`、`list`、`install 1.0`（11 文件 / 4.6 MB）全部正常。
 
 ## 目录
 
