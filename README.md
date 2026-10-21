@@ -182,4 +182,8 @@ tests/          28 个单元测试
 * 下载源策略、镜像路径与目录布局参考了 [PCL](https://github.com/Meloong-Git/PCL) 的实现，代码为独立编写。
 * 仅下载用户有权使用的文件；请遵守 Mojang 的 EULA 与各加载器/整合包的分发许可。
 * Forge 的版本 JSON 里带有“请勿自动化下载”的提示。本项目只是调用官方 installer 与官方 maven，如你认同该提示，请通过 <https://www.patreon.com/LexManos/> 支持 Forge，或手动安装。
+* 发布的 `mcdl.exe` 没有商业代码签名证书，首次运行可能提示“未知发布者 / Windows 已保护你的电脑”：
+  这是缺少证书的正常现象，不是文件有问题。可核对 release 里的 SHA256，或从源码运行（`python -m mcdl`）。
+  想在本机消除提示，可自行生成自签名证书签名（见仓库外的 `scripts/sign-exe.ps1` 思路），
+  或申请真证书 / 开源项目免费签名（SignPath）。
 * MIT License。
