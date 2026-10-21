@@ -244,6 +244,25 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _print_welcome(parser: argparse.ArgumentParser) -> None:
+    """无参数启动（通常是双击）时的提示页；控制台里停住，避免窗口一闪而过。"""
+    print("mcdl %s —— 独立的 Minecraft 下载器（只下载，不启动）" % __version__)
+    print()
+    parser.print_help()
+    print()
+    print("常用示例：")
+    print("  mcdl install 1.20.1 --mirror bmclapi")
+    print("  mcdl install 1.20.1 --loader fabric --mirror bmclapi")
+    print("  mcdl modpack fabulously-optimized --dir .\\fo --mirror bmclapi")
+    print()
+    print("提示：在开始菜单搜索 PowerShell，cd 到本文件所在目录后运行，例如 .\\mcdl.exe doctor")
+    try:
+        if sys.stdin and sys.stdin.isatty():
+            input("按回车键退出...")
+    except (EOFError, OSError):
+        pass
+
+
 def _setup_console() -> None:
     """Windows 控制台默认 GBK，会把手写的中文输出变成乱码；统一切到 UTF-8。"""
     if sys.platform.startswith("win"):
@@ -264,6 +283,11 @@ def _setup_console() -> None:
 def main(argv: Optional[List[str]] = None) -> int:
     _setup_console()
     parser = build_parser()
+    if argv is None:
+        argv = sys.argv[1:]
+    if not argv:
+        _print_welcome(parser)
+        return EXIT_OK
     args = parser.parse_args(argv)
     if getattr(args, "limit", None) == 0:
         args.limit = None
