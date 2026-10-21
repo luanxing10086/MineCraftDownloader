@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mcdonloader"
+version = "0.1.0"
+description = "独立的 Minecraft 下载器：原版 / 带加载器的版本 / 整合包（只下载，不启动）"
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "MIT" }
+authors = [{ name = "mcdonloader contributors" }]
+keywords = ["minecraft", "downloader", "fabric", "forge", "neoforge", "quilt", "modrinth"]
+classifiers = [
+    "Environment :: Console",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Topic :: Games/Entertainment",
+]
+
+[project.scripts]
+mcdl = "mcdl.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/mcdonloader/mcdonloader"
+
+[tool.setuptools]
+packages = ["mcdl"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
