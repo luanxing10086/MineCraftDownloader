@@ -201,4 +201,7 @@ tests/          28 个单元测试
   这是缺少证书的正常现象，不是文件有问题。可核对 release 里的 SHA256，或从源码运行（`python -m mcdl`）。
   想在本机消除提示，可自行生成自签名证书签名（见仓库外的 `scripts/sign-exe.ps1` 思路），
   或申请真证书 / 开源项目免费签名（SignPath）。
+* 单文件 exe 启动时会把自身解压到 `%TEMP%`。若临时目录不可写（公司策略、清理工具、受限账户），
+  会弹出一个标题为 “Error” 的对话框并提示 `Could not create temporary directory`。
+  这时把 `TEMP`/`TMP` 指到可写目录再运行，或改用源码方式（`python -m mcdl.gui`）。
 * MIT License。
