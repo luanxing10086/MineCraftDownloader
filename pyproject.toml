@@ -3,13 +3,13 @@ requires = ["setuptools>=64"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "mcdonloader"
+name = "minecraftdownloader"
 version = "0.1.0"
 description = "独立的 Minecraft 下载器：原版 / 带加载器的版本 / 整合包（只下载，不启动）"
 readme = "README.md"
 requires-python = ">=3.8"
 license = { text = "MIT" }
-authors = [{ name = "mcdonloader contributors" }]
+authors = [{ name = "MineCraftDownloader contributors" }]
 keywords = ["minecraft", "downloader", "fabric", "forge", "neoforge", "quilt", "modrinth"]
 classifiers = [
     "Environment :: Console",
@@ -24,7 +24,7 @@ mcdl = "mcdl.cli:main"
 mcdl-gui = "mcdl.gui:main"
 
 [project.urls]
-Homepage = "https://github.com/mcdonloader/mcdonloader"
+Homepage = "https://github.com/luanxing10086/MineCraftDownloader"
 
 [tool.setuptools]
 packages = ["mcdl"]

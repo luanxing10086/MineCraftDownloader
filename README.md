@@ -6,7 +6,7 @@
 
 ## 下载
 
-**Windows 图形界面版（推荐）**：[Releases › v0.1.0](https://github.com/luanxing10086/mcdonloader/releases/latest) → `mcdl-gui.exe`
+**Windows 图形界面版（推荐）**：[Releases › v0.1.0](https://github.com/luanxing10086/MineCraftDownloader/releases/latest) → `mcdl-gui.exe`
 
 **命令行版**：同页面的 `mcdl.exe`
 
@@ -205,3 +205,13 @@ tests/          28 个单元测试
   会弹出一个标题为 “Error” 的对话框并提示 `Could not create temporary directory`。
   这时把 `TEMP`/`TMP` 指到可写目录再运行，或改用源码方式（`python -m mcdl.gui`）。
 * MIT License。
+
+## 后记
+
+本项目制作原因是 PCL 等一众第三方启动器 MC 本体的下载功能被一刀切了，我知道改个文件就能修好，但我许愿许快了（
+
+这个下载器支持下载 MC 本体 / 带加载器的版本 / 整合包；启动器的 mod 下载功能暂且没起爆那我就不许愿这个了，说实话我不觉得 mod 下载功能会爆。
+
+这是我有史以来做的第一个代码超过 1000 行的项目（实则大概也不算是我做的），全项目只有提示词、空仓库以及这段文字是我弄的，其他全是白饭喂出来的。大肥鱼 1017 香啊造啊，我现在也算是个 wishcoding 糕手了（乐
+
+由衷希望三方启动器的下载功能能尽快恢复，我这个当个纪念也挺好的。

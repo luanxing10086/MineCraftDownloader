@@ -12,7 +12,7 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, Iterable, List, Optional, Sequence
 
-USER_AGENT = "mcdl/0.1 (Minecraft downloader; +https://github.com/mcdonloader/mcdonloader)"
+USER_AGENT = "mcdl/0.1 (Minecraft downloader; +https://github.com/luanxing10086/MineCraftDownloader)"
 CHUNK = 256 * 1024
 TIMEOUT = 30
 
