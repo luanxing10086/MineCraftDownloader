@@ -1,4 +1,4 @@
-# mcdonloader
+# MineCraftDownloader
 
 独立的 Minecraft **下载器**：只负责把文件下载齐、按规范落盘，不含启动、登录、正版验证、皮肤、模组管理等任何其他功能。
 
