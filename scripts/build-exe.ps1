@@ -1,6 +1,6 @@
 ﻿<#
 .SYNOPSIS
-    构建 mcdl 的可执行文件（PyInstaller）。默认构建命令行版，加 -Gui 构建图形界面版。
+    构建 MCD 的可执行文件（PyInstaller）。默认构建命令行版，加 -Gui 构建图形界面版。
 
 .DESCRIPTION
     pip 在受限网络里可能卡住，所以依赖改为“直接抓 wheel 再解包”的方式获取；
@@ -22,11 +22,11 @@ $repo = Split-Path -Parent $PSScriptRoot
 
 if ($Gui) {
     $entry = Join-Path $repo 'tools\gui_entry.py'
-    $name = 'mcdl-gui'
+    $name = 'MCD-GUI'
     $mode = @('--windowed')
 } else {
-    $entry = Join-Path $repo 'tools\mcdl_entry.py'
-    $name = 'mcdl'
+    $entry = Join-Path $repo 'tools\mcd_entry.py'
+    $name = 'MCD'
     $mode = @('--console')
 }
 

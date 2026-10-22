@@ -4,7 +4,7 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from mcdl.rules import Context, allowed, maven_path, native_classifier  # noqa: E402
+from mcd.rules import Context, allowed, maven_path, native_classifier  # noqa: E402
 
 
 class RulesTest(unittest.TestCase):

@@ -7,7 +7,7 @@ import zipfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from mcdl import modpack  # noqa: E402
+from mcd import modpack  # noqa: E402
 
 
 def build_mrpack(path, index, overrides=None, extra=None):

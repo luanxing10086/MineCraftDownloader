@@ -17,7 +17,7 @@ import zipfile
 
 MIRROR = "https://pypi.tuna.tsinghua.edu.cn/simple"
 PACKAGES = ["pyinstaller", "pyinstaller-hooks-contrib", "altgraph", "pefile", "pywin32-ctypes", "packaging"]
-UA = {"User-Agent": "mcdl-build/1.0"}
+UA = {"User-Agent": "mcd-build/1.0"}
 
 
 def version_key(text: str):

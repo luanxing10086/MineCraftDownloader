@@ -4,7 +4,7 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from mcdl.mirror import BMCLAPI_BASE, Mirror  # noqa: E402
+from mcd.mirror import BMCLAPI_BASE, Mirror  # noqa: E402
 
 
 class MirrorTest(unittest.TestCase):

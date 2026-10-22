@@ -1,4 +1,4 @@
-"""允许 python -m mcdl 直接运行。"""
+"""允许 python -m mcd 直接运行。"""
 
 from .cli import main
 

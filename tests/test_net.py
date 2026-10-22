@@ -7,7 +7,7 @@ import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from mcdl import net  # noqa: E402
+from mcd import net  # noqa: E402
 
 
 class NetTest(unittest.TestCase):
@@ -26,8 +26,8 @@ class NetTest(unittest.TestCase):
     def test_file_sha1(self):
         path = os.path.join(self.root, "a.bin")
         with open(path, "wb") as handle:
-            handle.write(b"mcdl")
-        expected = hashlib.sha1(b"mcdl").hexdigest()
+            handle.write(b"mcd")
+        expected = hashlib.sha1(b"mcd").hexdigest()
         self.assertEqual(net.file_sha1(path), expected)
 
     def test_download_from_file_url_and_skip_cached(self):

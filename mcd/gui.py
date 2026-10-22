@@ -25,7 +25,7 @@ from .mirror import BMCLAPI, OFFICIAL, Mirror
 from .net import DownloadError, human_size
 from .rules import Context
 
-APP_TITLE = "mcdl · Minecraft 下载器"
+APP_TITLE = "MCD · Minecraft 下载器"
 LOADER_CHOICES = [("none", "无（仅原版）"), ("fabric", "Fabric"), ("quilt", "Quilt"),
                   ("forge", "Forge"), ("neoforge", "NeoForge")]
 AUTO = "自动（推荐）"

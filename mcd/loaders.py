@@ -351,7 +351,7 @@ def install_forge(
         raise InstallError("Forge 版本号应形如 %s-47.4.10（收到 %r）" % (game, forge_version))
 
     url = "%s/net/minecraftforge/forge/%s/forge-%s-installer.jar" % (FORGE_MAVEN, full, full)
-    jar_path = os.path.join(game_dir, ".mcdl", "installers", "forge-%s-installer.jar" % full)
+    jar_path = os.path.join(game_dir, ".mcd", "installers", "forge-%s-installer.jar" % full)
     download(jar_path, mirror.urls(url), proxy=proxy, reporter=reporter,
              label="installers/forge-%s-installer.jar" % full)
     if mirror.is_mirror:
@@ -459,7 +459,7 @@ def install_neoforge(
     else:
         base = NEOFORGE_MAVEN
     url = "%s/%s/%s/neoforge-%s-installer.jar" % (base, NEOFORGE_GROUP, neoforge_version, neoforge_version)
-    jar_path = os.path.join(game_dir, ".mcdl", "installers", "neoforge-%s-installer.jar" % neoforge_version)
+    jar_path = os.path.join(game_dir, ".mcd", "installers", "neoforge-%s-installer.jar" % neoforge_version)
     try:
         download(jar_path, mirror.urls(url), proxy=proxy, reporter=reporter,
                  label="installers/neoforge-%s-installer.jar" % neoforge_version)

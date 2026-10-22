@@ -68,7 +68,7 @@ def write_version_json(game_dir: str, version_id: str, data: dict) -> str:
 
 
 def _manifest_cache_path(game_dir: str) -> str:
-    return os.path.join(game_dir, ".mcdl", "version_manifest_v2.json")
+    return os.path.join(game_dir, ".mcd", "version_manifest_v2.json")
 
 
 def load_manifest(
@@ -106,7 +106,7 @@ def find_version_entry(manifest: dict, version_id: str) -> dict:
     for entry in manifest.get("versions", []):
         if entry.get("id") == version_id:
             return entry
-    raise InstallError("版本清单里没有 %r（可用 mcdl list 查看）" % version_id)
+    raise InstallError("版本清单里没有 %r（可用 mcd list 查看）" % version_id)
 
 
 def list_versions(manifest: dict, kind: str = "release") -> List[dict]:

@@ -1,4 +1,4 @@
-"""命令行入口：mcdl list / install / modpack / doctor。"""
+"""命令行入口：mcd list / install / modpack / doctor。"""
 
 from __future__ import annotations
 
@@ -81,7 +81,7 @@ def cmd_install(args: argparse.Namespace) -> int:
     elif version_id == "snapshot":
         version_id = (manifest.get("latest") or {}).get("snapshot")
     if not version_id:
-        raise _Fatal("无法确定要下载的版本，请显式给出，例如 mcdl install 1.20.1")
+        raise _Fatal("无法确定要下载的版本，请显式给出，例如 mcd install 1.20.1")
 
     print("目标目录：%s" % os.path.abspath(game_dir))
     print("下载源：%s" % mirror.label)
@@ -168,7 +168,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         ("NeoForge maven", "https://maven.neoforged.net/releases/net/neoforged/neoforge/maven-metadata.xml"),
         ("Modrinth API", "https://api.modrinth.com/v2/project/fabric-api"),
     ]
-    print("mcdl %s    Python %s" % (__version__, sys.version.split()[0]))
+    print("MCD %s    Python %s" % (__version__, sys.version.split()[0]))
     print()
     _print_header("网络")
     for label, url in targets:
@@ -200,10 +200,10 @@ def _probe(url: str, timeout: int = 8):
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="mcdl",
+        prog="MCD",
         description="独立的 Minecraft 下载器：原版 / 带加载器的版本 / 整合包（只下载，不启动）",
     )
-    parser.add_argument("--version", action="version", version="mcdl %s" % __version__)
+    parser.add_argument("--version", action="version", version="MCD %s" % __version__)
 
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--dir", default=DEFAULT_DIR, help="游戏目录，默认 ./%s" % DEFAULT_DIR)
@@ -246,16 +246,16 @@ def build_parser() -> argparse.ArgumentParser:
 
 def _print_welcome(parser: argparse.ArgumentParser) -> None:
     """无参数启动（通常是双击）时的提示页；控制台里停住，避免窗口一闪而过。"""
-    print("mcdl %s —— 独立的 Minecraft 下载器（只下载，不启动）" % __version__)
+    print("MCD %s —— 独立的 Minecraft 下载器（只下载，不启动）" % __version__)
     print()
     parser.print_help()
     print()
     print("常用示例：")
-    print("  mcdl install 1.20.1 --mirror bmclapi")
-    print("  mcdl install 1.20.1 --loader fabric --mirror bmclapi")
-    print("  mcdl modpack fabulously-optimized --dir .\\fo --mirror bmclapi")
+    print("  mcd install 1.20.1 --mirror bmclapi")
+    print("  mcd install 1.20.1 --loader fabric --mirror bmclapi")
+    print("  mcd modpack fabulously-optimized --dir .\\fo --mirror bmclapi")
     print()
-    print("提示：在开始菜单搜索 PowerShell，cd 到本文件所在目录后运行，例如 .\\mcdl.exe doctor")
+    print("提示：在开始菜单搜索 PowerShell，cd 到本文件所在目录后运行，例如 .\\MCD.exe doctor")
     try:
         if sys.stdin and sys.stdin.isatty():
             input("按回车键退出...")

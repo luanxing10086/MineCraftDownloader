@@ -68,7 +68,7 @@ def resolve_source(
     reporter: Optional[Reporter] = None,
 ) -> Tuple[str, Dict]:
     """返回 (本地 zip 路径, 元信息)。元信息用于日志与结果展示。"""
-    cache_dir = os.path.join(game_dir, ".mcdl", "packs")
+    cache_dir = os.path.join(game_dir, ".mcd", "packs")
     os.makedirs(cache_dir, exist_ok=True)
 
     if os.path.isfile(source):

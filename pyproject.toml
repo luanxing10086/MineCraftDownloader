@@ -20,14 +20,14 @@ classifiers = [
 ]
 
 [project.scripts]
-mcdl = "mcdl.cli:main"
-mcdl-gui = "mcdl.gui:main"
+mcd = "mcd.cli:main"
+mcd-gui = "mcd.gui:main"
 
 [project.urls]
 Homepage = "https://github.com/luanxing10086/MineCraftDownloader"
 
 [tool.setuptools]
-packages = ["mcdl"]
+packages = ["mcd"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
