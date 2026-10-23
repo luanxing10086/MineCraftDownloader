@@ -1,17 +1,21 @@
-"""图形界面：选游戏版本 + 选加载器 + 一键下载（tkinter，标准库，无第三方依赖）。
+"""图形界面：版本 + 加载器 + 整合包 + 自定义下载（tkinter，标准库）。
 
-设计目标对齐 PCL 的“版本选择”体验：左边是版本列表，右边选加载器，底部是下载选项与日志。
-所有网络与磁盘操作都在后台线程里跑，界面通过队列回传日志与进度。
+所有网络与磁盘操作都在后台线程，界面通过队列回传日志与进度。
+
+版本隔离只影响“下载内容写到哪”（建出和 PCL/HMCL 隔离模式相同的目录结构），
+不涉及启动时的存档/配置重定向——那部分由启动器负责。
 """
 
 from __future__ import annotations
 
+import json
 import os
 import queue
 import sys
 import threading
 import traceback
-from typing import Dict, List, Optional
+import webbrowser
+from typing import Dict, List, Optional, Tuple
 
 import tkinter as tk
 from tkinter import filedialog, messagebox
@@ -19,24 +23,119 @@ from tkinter import font as tkfont
 from tkinter import ttk
 from tkinter.scrolledtext import ScrolledText
 
-from . import __version__, java, modpack, vanilla
+from . import __version__, config, modpack, mods, sources, vanilla
 from . import loaders as loader_mod
 from .mirror import BMCLAPI, OFFICIAL, Mirror
-from .net import DownloadError, human_size
+from .net import DownloadError, fetch_json, human_size
 from .rules import Context
 
-APP_TITLE = "MCD · Minecraft 下载器"
+APP_TITLE = "MCD"
+HEADER_TEXT = "Minecraft 下载器"
+
+AUTO_RELEASE = "最新正式版（自动）"
+AUTO_BETA = "最新测试版（自动）"
+AUTO_LATEST = "最新（自动）"
+UNIQUE_SUFFIX = " - 唯一"
+
 LOADER_CHOICES = [("none", "无（仅原版）"), ("fabric", "Fabric"), ("quilt", "Quilt"),
                   ("forge", "Forge"), ("neoforge", "NeoForge")]
-AUTO = "自动（推荐）"
+
+LICENSE_URL = "https://www.minecraft.net/zh-hans/store/minecraft-java-bedrock-edition-pc"
+LICENSE_TEXT = (
+    "MCD 仅为正版 Minecraft 用户提供下载服务。\n\n"
+    "本工具不提供账号登录、不破解、不绕过正版验证；下载的游戏文件均来自 "
+    "Mojang 与各加载器的官方渠道。\n\n"
+    "如果你还没有购买 Minecraft，请先通过官方渠道获取正版授权。"
+)
+
+
+# ---------------------------------------------------------------- 路径与工具
+
+
+def launcher_dir() -> str:
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(os.path.abspath(sys.executable))
+    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def probe_writable(directory: str) -> Tuple[bool, str]:
+    """目录是否可写；不可写时返回原因。"""
+    try:
+        if not os.path.isdir(directory):
+            os.makedirs(directory, exist_ok=True)
+        probe = os.path.join(directory, ".mcd-write-test")
+        with open(probe, "w", encoding="utf-8") as handle:
+            handle.write("ok")
+        os.remove(probe)
+        return True, ""
+    except OSError as exc:
+        return False, "%s（%s）" % (exc.strerror or exc, directory)
+
+
+def default_game_dir() -> Tuple[str, Optional[str]]:
+    """默认 <启动器目录>\\.minecraft；不可写则回退 %APPDATA%\\.minecraft 并说明原因。"""
+    base = launcher_dir()
+    candidate = os.path.join(base, ".minecraft")
+    ok, reason = probe_writable(base)
+    if ok:
+        return candidate, None
+    fallback = os.path.join(os.environ.get("APPDATA") or os.path.expanduser("~"), ".minecraft")
+    return fallback, "启动器所在目录不可写：%s；已改用 %s" % (reason, fallback)
+
+
+def normalize_keyword(text: str) -> str:
+    """中文输入法容易打出全角句点，统一成半角，保证能搜 1.20.1。"""
+    return (text or "").replace("。", ".").replace("．", ".").replace("·", ".")
+
+
+def detect_isolation(game_dir: str) -> Tuple[Optional[bool], str]:
+    """按目录特征判断启动器是否开启版本隔离。返回 (是否隔离, 依据)。"""
+    versions = os.path.join(game_dir, "versions")
+    isolated_evidence = None
+    if os.path.isdir(versions):
+        for name in sorted(os.listdir(versions)):
+            version_path = os.path.join(versions, name)
+            if not os.path.isdir(version_path):
+                continue
+            if os.path.isdir(os.path.join(version_path, ".minecraft")):
+                return True, "versions/%s/.minecraft（HMCL 隔离结构）" % name
+            for sub in ("mods", "config", "saves", "resourcepacks", "shaderpacks"):
+                if os.path.isdir(os.path.join(version_path, sub)):
+                    isolated_evidence = "versions/%s/%s" % (name, sub)
+                    break
+            if isolated_evidence:
+                break
+    if isolated_evidence:
+        return True, isolated_evidence
+    if os.path.isdir(os.path.join(game_dir, "mods")):
+        return False, "根目录有 mods，且各版本目录没有隔离结构"
+    if not os.path.isdir(versions):
+        return None, "目录里还没有 versions 子目录"
+    return None, "没有找到可判断的特征目录"
+
+
+def expected_version_id(loader: str, loader_version: Optional[str], game: str) -> str:
+    if not loader or loader == "none" or not loader_version:
+        return game
+    if loader == "fabric":
+        return "fabric-loader-%s-%s" % (loader_version, game)
+    if loader == "quilt":
+        return "quilt-loader-%s-%s" % (loader_version, game)
+    if loader == "forge":
+        return "%s-forge-%s" % (game, loader_version)
+    return "neoforge-%s" % loader_version
+
+
+def content_root(game_dir: str, version_id: Optional[str], isolate: bool) -> str:
+    if isolate and version_id:
+        return os.path.join(game_dir, "versions", version_id)
+    return game_dir
 
 
 # ---------------------------------------------------------------- 进度适配
 
 
 class GuiReporter:
-    """把 net.Reporter 的终端输出改写成队列消息，供界面消费。"""
-
     def __init__(self, emit):
         self._emit = emit
         self.total_files = 0
@@ -70,8 +169,6 @@ class GuiReporter:
 
 
 class _Stream:
-    """替代 sys.stdout/stderr：窗口程序没有控制台，把输出接进日志框。"""
-
     def __init__(self, sink):
         self._sink = sink
 
@@ -99,27 +196,37 @@ class App:
         self.versions: List[dict] = []
         self.busy = False
         self._loader_seq = 0
+        self._search_job = None
+        self._loader_cache: Dict[Tuple[str, str], Tuple[List[Tuple[str, bool]], bool]] = {}
+        self._fabric_cache: Dict[str, List[dict]] = {}
+        self.settings = config.load()
+        self.custom_sources = sources.load_sources()
 
-        self.root.title("%s  v%s" % (APP_TITLE, __version__))
+        game_dir, self.dir_warning = default_game_dir()
+        self.settings.setdefault("game_dir", game_dir)
+
+        self.root.title(APP_TITLE)
         self._apply_dpi_scale()
-        self.root.minsize(int(900 * self.scale), int(640 * self.scale))
+        self.root.minsize(int(940 * self.scale), int(720 * self.scale))
         self._init_style()
         self._build_ui()
+        if self.dir_warning:
+            self._append_log(self.dir_warning)
 
         self.root.after(80, self._drain_queue)
         self._load_manifest_async()
+        self.root.after(300, self._maybe_show_license_notice)
         if auto_close_ms:
             self.root.after(auto_close_ms, self._finish_self_test)
 
     # ---- 外观 -------------------------------------------------------
 
     def _apply_dpi_scale(self) -> None:
-        """高分屏下 Tk 默认按 96 DPI 排版，窗口会显得很小；按实际 DPI 放大。"""
         try:
             self.scale = max(1.0, self.root.winfo_fpixels("1i") / 96.0)
         except tk.TclError:
             self.scale = 1.0
-        self.root.geometry("%dx%d" % (int(1020 * self.scale), int(780 * self.scale)))
+        self.root.geometry("%dx%d" % (int(1060 * self.scale), int(830 * self.scale)))
 
     def _init_style(self) -> None:
         style = ttk.Style()
@@ -133,6 +240,7 @@ class App:
             tkfont.nametofont("TkTextFont").configure(family=family, size=9)
         style.configure("H1.TLabel", font=(family, 15, "bold"))
         style.configure("Hint.TLabel", foreground="#666666")
+        style.configure("Warn.TLabel", foreground="#a15c00")
         style.configure("Accent.TButton", font=(family, 10, "bold"))
 
     def _build_ui(self) -> None:
@@ -141,20 +249,21 @@ class App:
 
         header = ttk.Frame(outer)
         header.pack(fill="x")
-        ttk.Label(header, text="Minecraft 下载器", style="H1.TLabel").pack(side="left")
-        ttk.Label(header, text="只下载，不启动 · 落盘结构兼容 PCL / HMCL / Prism",
-                  style="Hint.TLabel").pack(side="left", padx=12)
+        ttk.Label(header, text=HEADER_TEXT, style="H1.TLabel").pack(side="left")
 
         self.notebook = ttk.Notebook(outer)
         self.notebook.pack(fill="both", expand=True, pady=(10, 8))
         self.tab_version = ttk.Frame(self.notebook, padding=10)
         self.tab_pack = ttk.Frame(self.notebook, padding=10)
+        self.tab_custom = ttk.Frame(self.notebook, padding=10)
         self.notebook.add(self.tab_version, text="  版本与加载器  ")
         self.notebook.add(self.tab_pack, text="  整合包  ")
+        self.notebook.add(self.tab_custom, text="  自定义下载  ")
         self.notebook.bind("<<NotebookTabChanged>>", lambda _e: self._update_action_text())
 
         self._build_version_tab()
         self._build_pack_tab()
+        self._build_custom_tab()
         self._build_options(outer)
         self._build_log(outer)
 
@@ -175,9 +284,8 @@ class App:
 
         ttk.Label(bar, text="搜索").pack(side="left")
         self.var_search = tk.StringVar()
-        entry_search = ttk.Entry(bar, textvariable=self.var_search, width=18)
-        entry_search.pack(side="left", padx=(6, 12))
-        entry_search.bind("<KeyRelease>", lambda _e: self._refresh_version_list())
+        self.var_search.trace_add("write", lambda *_a: self._schedule_search())
+        ttk.Entry(bar, textvariable=self.var_search, width=18).pack(side="left", padx=(6, 12))
 
         ttk.Button(bar, text="刷新版本列表", command=self._load_manifest_async).pack(side="left")
         self.lbl_versions = ttk.Label(bar, text="正在加载版本列表…", style="Hint.TLabel")
@@ -213,13 +321,25 @@ class App:
         self.combo_loader.bind("<<ComboboxSelected>>", lambda _e: self._on_loader_changed())
 
         ttk.Label(row, text="加载器版本").pack(side="left")
-        self.var_loader_version = tk.StringVar(value=AUTO)
+        self.var_loader_version = tk.StringVar(value=AUTO_LATEST)
         self.combo_loader_version = ttk.Combobox(row, textvariable=self.var_loader_version, width=26,
-                                                 values=[AUTO])
+                                                 state="readonly", values=[AUTO_LATEST])
         self.combo_loader_version.pack(side="left", padx=(6, 16))
 
-        self.lbl_loader_hint = ttk.Label(loader, text="选择加载器后会联网列出可用版本；Forge / NeoForge 需要本机有 Java 17 或 21。",
-                                         style="Hint.TLabel")
+        self.fabric_frame = ttk.Frame(loader)
+        self.var_fabric_api = tk.BooleanVar(value=False)
+        self.chk_fabric_api = ttk.Checkbutton(self.fabric_frame, text="同时安装 Fabric API",
+                                              variable=self.var_fabric_api,
+                                              command=self._on_fabric_api_toggle)
+        self.chk_fabric_api.pack(side="left")
+        self.var_fabric_api_version = tk.StringVar(value="最新")
+        self.combo_fabric_api = ttk.Combobox(self.fabric_frame, textvariable=self.var_fabric_api_version,
+                                             width=22, state="disabled", values=["最新"])
+        self.combo_fabric_api.pack(side="left", padx=6)
+
+        self.lbl_loader_hint = ttk.Label(
+            loader, text="选择加载器后会联网列出可用版本；Forge / NeoForge 需要本机有 Java 17 或 21。",
+            style="Hint.TLabel")
         self.lbl_loader_hint.pack(anchor="w", pady=(6, 0))
 
     # ---- 整合包 ------------------------------------------------------
@@ -238,13 +358,49 @@ class App:
         ttk.Label(box, text="示例：fabulously-optimized、fabulously-optimized@14.1.1、"
                             "https://modrinth.com/modpack/xxx", style="Hint.TLabel").pack(anchor="w")
 
-        tips = (
-            "说明：\n"
-            "· 会先按整合包声明的 Minecraft 版本下载原版，再装对应加载器，最后拉取 mods / 配置与 overrides。\n"
-            "· 整合包里的文件直接落到“下载目录”下，可直接用启动器打开该目录。\n"
-            "· CurseForge 格式（manifest.json）暂不支持，会给出提示。"
+        reason = (
+            "为什么不支持 CurseForge 整合包：\n"
+            "  · CurseForge 的官方 API 需要单独申请 API Key，条款要求说明用途并接受审核；\n"
+            "    个人工具很难长期持有授权，把密钥内置在开源客户端里也不合适；\n"
+            "  · 包里每个文件的下载地址由该 API 动态签发，缺 Key 时连 mod 文件都解析不出来；\n"
+            "  · 抓网页或走非授权镜像属于绕过限制，本项目不做。\n"
+            "\n"
+            "替代方案：多数 CF 整合包同时发布在 Modrinth，可直接搜到；只有 CF 版本时，\n"
+            "可先用 CurseForge App 下载，或请作者导出 .mrpack 后在本页“选择文件”安装。"
         )
-        ttk.Label(box, text=tips, style="Hint.TLabel", justify="left").pack(anchor="w", pady=(10, 0))
+        ttk.Label(box, text=reason, style="Hint.TLabel", justify="left").pack(anchor="w", pady=(12, 0))
+
+    # ---- 自定义下载 --------------------------------------------------
+
+    def _build_custom_tab(self) -> None:
+        box = ttk.LabelFrame(self.tab_custom, text="任意链接下载（类似 PCL 的自定义下载）", padding=8)
+        box.pack(fill="both", expand=True)
+
+        ttk.Label(box, text="下载链接（http / https，可直接粘贴文件直链）").pack(anchor="w")
+        self.var_custom_url = tk.StringVar()
+        ttk.Entry(box, textvariable=self.var_custom_url).pack(fill="x", pady=(4, 10))
+
+        path_row = ttk.Frame(box)
+        path_row.pack(fill="x")
+        ttk.Label(path_row, text="保存位置").pack(side="left")
+        self.var_custom_dest = tk.StringVar(value="")
+        ttk.Entry(path_row, textvariable=self.var_custom_dest).pack(side="left", fill="x", expand=True, padx=6)
+        ttk.Button(path_row, text="选择目录…", command=self._browse_custom_dest).pack(side="left")
+
+        name_row = ttk.Frame(box)
+        name_row.pack(fill="x", pady=(8, 0))
+        ttk.Label(name_row, text="文件名").pack(side="left")
+        self.var_custom_name = tk.StringVar(value="")
+        ttk.Entry(name_row, textvariable=self.var_custom_name, width=40).pack(side="left", padx=6)
+        ttk.Label(name_row, text="留空则用链接里的文件名", style="Hint.TLabel").pack(side="left")
+
+        note = (
+            "说明：\n"
+            "  · 保存位置留空时存到 <安装目录>/downloads；\n"
+            "  · 下载的是 .mrpack 时会额外询问是否直接按整合包安装；\n"
+            "  · 不校验哈希、不判断文件用途，请确认链接来源可信。"
+        )
+        ttk.Label(box, text=note, style="Hint.TLabel", justify="left").pack(anchor="w", pady=(12, 0))
 
     # ---- 选项 --------------------------------------------------------
 
@@ -255,46 +411,70 @@ class App:
         line1 = ttk.Frame(box)
         line1.pack(fill="x")
         ttk.Label(line1, text="安装目录").pack(side="left")
-        self.var_dir = tk.StringVar(value=os.path.abspath("minecraft"))
-        ttk.Entry(line1, textvariable=self.var_dir).pack(side="left", fill="x", expand=True, padx=6)
+        self.var_dir = tk.StringVar(value=str(self.settings.get("game_dir")))
+        self.entry_dir = ttk.Entry(line1, textvariable=self.var_dir)
+        self.entry_dir.pack(side="left", fill="x", expand=True, padx=6)
+        self.entry_dir.bind("<FocusOut>", lambda _e: self._on_dir_changed())
         ttk.Button(line1, text="浏览…", command=self._browse_dir).pack(side="left")
         ttk.Button(line1, text="打开", command=self._open_dir).pack(side="left", padx=(6, 0))
 
+        self.lbl_dir_hint = ttk.Label(
+            box, text="默认是启动器同目录下的 .minecraft；要复用 PCL / HMCL 已下载的文件，改成对应目录即可。",
+            style="Hint.TLabel", justify="left")
+        self.lbl_dir_hint.pack(anchor="w", pady=(4, 8))
+        if self.dir_warning:
+            self.lbl_dir_hint.configure(text=self.dir_warning, style="Warn.TLabel")
+
         line2 = ttk.Frame(box)
-        line2.pack(fill="x", pady=(8, 0))
+        line2.pack(fill="x")
         ttk.Label(line2, text="下载源").pack(side="left")
-        self.var_mirror = tk.StringVar(value="bmclapi")
+        self.var_mirror = tk.StringVar(value=self.settings.get("mirror") or "bmclapi")
         ttk.Radiobutton(line2, text="BMCLAPI 镜像（国内推荐）", value="bmclapi",
-                        variable=self.var_mirror).pack(side="left", padx=(6, 10))
+                        variable=self.var_mirror).pack(side="left", padx=(6, 8))
         ttk.Radiobutton(line2, text="Mojang 官方", value="official",
+                        variable=self.var_mirror).pack(side="left", padx=(0, 12))
+        ttk.Radiobutton(line2, text="自定义源", value="custom",
                         variable=self.var_mirror).pack(side="left")
+        self.var_custom_source = tk.StringVar(value=self.custom_sources[0]["name"] if self.custom_sources else "")
+        self.combo_source = ttk.Combobox(line2, textvariable=self.var_custom_source, width=18, state="readonly",
+                                         values=[item["name"] for item in self.custom_sources])
+        self.combo_source.pack(side="left", padx=6)
+        ttk.Button(line2, text="导入…", command=self._import_source).pack(side="left")
 
+        line3 = ttk.Frame(box)
+        line3.pack(fill="x", pady=(8, 0))
+        self.var_isolate = tk.BooleanVar(value=bool(self.settings.get("isolate", False)))
+        ttk.Checkbutton(line3, text="版本隔离", variable=self.var_isolate,
+                        command=self._on_isolate_toggled).pack(side="left")
         self.var_skip_assets = tk.BooleanVar(value=False)
-        ttk.Checkbutton(line2, text="跳过资源文件（assets，体积最大）",
-                        variable=self.var_skip_assets).pack(side="left", padx=16)
+        ttk.Checkbutton(line3, text="跳过资源文件（assets）", variable=self.var_skip_assets,
+                        command=self._update_skip_hint).pack(side="left", padx=16)
+        ttk.Label(line3, text="并发").pack(side="left", padx=(8, 0))
+        self.var_threads = tk.IntVar(value=int(self.settings.get("threads") or 8))
+        ttk.Spinbox(line3, from_=1, to=32, width=4, textvariable=self.var_threads).pack(side="left", padx=4)
 
-        ttk.Label(line2, text="并发").pack(side="left", padx=(8, 0))
-        self.var_threads = tk.IntVar(value=8)
-        ttk.Spinbox(line2, from_=1, to=32, width=4, textvariable=self.var_threads).pack(side="left", padx=4)
+        self.lbl_iso_hint = ttk.Label(box, text="", style="Hint.TLabel", justify="left")
+        self.lbl_iso_hint.pack(anchor="w", pady=(4, 0))
+        self.lbl_skip_hint = ttk.Label(box, text="", style="Warn.TLabel", justify="left")
+        self.lbl_skip_hint.pack(anchor="w")
+        self._on_isolate_toggled(silent=True)
 
     def _build_log(self, parent: ttk.Frame) -> None:
-        # 先占住底部操作条，日志框再用剩余空间，避免按钮被挤出窗口
         bottom = ttk.Frame(parent)
         bottom.pack(side="bottom", fill="x", pady=(8, 0))
         self.progress = ttk.Progressbar(bottom, mode="determinate", maximum=100)
         self.progress.pack(side="left", fill="x", expand=True)
-        self.lbl_status = ttk.Label(bottom, text="就绪", width=42, anchor="w")
+        self.lbl_status = ttk.Label(bottom, text="就绪", width=40, anchor="w")
         self.lbl_status.pack(side="left", padx=10)
         self.btn_start = ttk.Button(bottom, text="开始下载", style="Accent.TButton", command=self._start)
         self.btn_start.pack(side="right")
 
         box = ttk.LabelFrame(parent, text="日志", padding=6)
         box.pack(fill="both", expand=True, pady=(8, 0))
-
-        self.log = ScrolledText(box, height=8, wrap="none", state="disabled")
+        self.log = ScrolledText(box, height=7, wrap="none", state="disabled")
         self.log.pack(fill="both", expand=True)
 
-    # ---- 辅助 --------------------------------------------------------
+    # ---- 队列与状态 --------------------------------------------------
 
     def _emit(self, message: tuple) -> None:
         self.queue.put(message)
@@ -317,6 +497,10 @@ class App:
                     self._refresh_version_list()
                 elif kind == "loader_versions":
                     self._apply_loader_versions(*rest)
+                elif kind == "fabric_api":
+                    self._apply_fabric_api(*rest)
+                elif kind == "ask_mrpack":
+                    self._ask_install_mrpack(rest[0])
                 elif kind == "done":
                     self._on_finished(rest[0])
         except queue.Empty:
@@ -331,19 +515,64 @@ class App:
 
     def _set_busy(self, busy: bool) -> None:
         self.busy = busy
-        state = "disabled" if busy else "normal"
-        self.btn_start.configure(state=state, text="下载中…" if busy else "开始下载")
+        self.btn_start.configure(state="disabled" if busy else "normal",
+                                 text="下载中…" if busy else self._action_text())
+
+    def _action_text(self) -> str:
+        index = self.notebook.index(self.notebook.select())
+        return {0: "开始下载", 1: "下载整合包", 2: "开始下载"}.get(index, "开始下载")
 
     def _update_action_text(self) -> None:
-        if self.busy:
+        if not self.busy:
+            self.btn_start.configure(text=self._action_text())
+        if self.notebook.index(self.notebook.select()) == 2 and not self.var_custom_dest.get():
+            self.var_custom_dest.set(os.path.join(os.path.abspath(self.var_dir.get()), "downloads"))
+
+    def _update_skip_hint(self) -> None:
+        if self.var_skip_assets.get():
+            self.lbl_skip_hint.configure(
+                text="已跳过 assets：游戏内声音、语言文件、字体与部分贴图会缺失或异常；"
+                     "仅建议在网络极差、只需要版本文件（做服务端/查崩溃）时使用。")
+        else:
+            self.lbl_skip_hint.configure(text="")
+
+    def _on_isolate_toggled(self, silent: bool = False) -> None:
+        if self.var_isolate.get():
+            text = ("隔离开启：整合包与 Fabric API 的内容会写到 versions/<版本>/（mods、config 等），"
+                    "与 PCL、HMCL 的“版本隔离”目录结构一致。\n"
+                    "注意：请让启动器里的版本隔离设置与这里保持一致，否则可能加载不到模组。")
+        else:
+            text = "隔离关闭：内容写到游戏根目录（mods、config 等），使用全局配置。"
+        self.lbl_iso_hint.configure(text=text)
+        if not silent:
+            self._append_log("版本隔离：" + ("开启" if self.var_isolate.get() else "关闭"))
+
+    # ---- 目录 --------------------------------------------------------
+
+    def _on_dir_changed(self) -> None:
+        path = os.path.abspath(self.var_dir.get().strip())
+        isolated, reason = detect_isolation(path)
+        if isolated is None:
+            self._append_log("无法判断该目录的版本隔离状态（%s），保持当前设置。" % reason)
             return
-        is_pack = self.notebook.index(self.notebook.select()) == 1
-        self.btn_start.configure(text="下载整合包" if is_pack else "开始下载")
+        current = bool(self.var_isolate.get())
+        if isolated != current:
+            self.var_isolate.set(isolated)
+            self._on_isolate_toggled(silent=True)
+            self._append_log("检测到目录特征：%s → 已自动%s版本隔离。" % (reason, "开启" if isolated else "关闭"))
+        else:
+            self._append_log("目录特征：%s（版本隔离已与检测结果一致）" % reason)
 
     def _browse_dir(self) -> None:
         chosen = filedialog.askdirectory(initialdir=self.var_dir.get() or os.getcwd())
         if chosen:
             self.var_dir.set(os.path.normpath(chosen))
+            self._on_dir_changed()
+
+    def _browse_custom_dest(self) -> None:
+        chosen = filedialog.askdirectory(initialdir=self.var_custom_dest.get() or os.getcwd())
+        if chosen:
+            self.var_custom_dest.set(os.path.normpath(chosen))
 
     def _browse_pack(self) -> None:
         chosen = filedialog.askopenfilename(filetypes=[("Modrinth 整合包", "*.mrpack"), ("压缩包", "*.zip")])
@@ -353,21 +582,62 @@ class App:
 
     def _open_dir(self) -> None:
         path = os.path.abspath(self.var_dir.get())
-        os.makedirs(path, exist_ok=True)
+        ok, reason = probe_writable(path)
+        if not ok:
+            messagebox.showerror("目录不可写", reason)
+            return
         try:
             os.startfile(path)  # type: ignore[attr-defined]
         except Exception as exc:  # noqa: BLE001
             messagebox.showerror("打开失败", str(exc))
 
+    # ---- 自定义源 ----------------------------------------------------
+
+    def _import_source(self) -> None:
+        path = filedialog.askopenfilename(filetypes=[("下载源配置", "*.json"), ("所有文件", "*.*")])
+        if not path:
+            return
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                raw = json.load(handle)
+            sources.add_source(raw)
+        except Exception as exc:  # noqa: BLE001
+            messagebox.showerror("导入失败", "%s\n\n已生成示例文件：%s" % (exc, sources.write_example()))
+            return
+        self.custom_sources = sources.load_sources()
+        self.combo_source.configure(values=[item["name"] for item in self.custom_sources])
+        self.var_custom_source.set(raw["name"])
+        self.var_mirror.set("custom")
+        self._append_log("已导入下载源：%s" % raw["name"])
+
+    def _selected_mirror(self) -> Mirror:
+        choice = self.var_mirror.get()
+        if choice == "custom":
+            name = self.var_custom_source.get()
+            for item in self.custom_sources:
+                if item.get("name") == name:
+                    return sources.to_mirror(item)
+            return Mirror(BMCLAPI)
+        return Mirror(OFFICIAL if choice == "official" else BMCLAPI)
+
     # ---- 版本列表 ----------------------------------------------------
+
+    def _schedule_search(self) -> None:
+        if self._search_job:
+            try:
+                self.root.after_cancel(self._search_job)
+            except tk.TclError:
+                pass
+        self._search_job = self.root.after(180, self._refresh_version_list)
 
     def _load_manifest_async(self) -> None:
         self.lbl_versions.configure(text="正在加载版本列表…")
+        game_dir = os.path.abspath(self.var_dir.get())
+        mirror = self._selected_mirror()
 
         def work():
-            mirror = Mirror(OFFICIAL if self.var_mirror.get() == "official" else BMCLAPI)
             try:
-                manifest = vanilla.load_manifest(os.path.abspath(self.var_dir.get()), mirror, refresh=True)
+                manifest = vanilla.load_manifest(game_dir, mirror, refresh=True)
                 self.manifest = manifest
                 self._emit(("log", "版本列表已更新：共 %d 个版本" % len(manifest.get("versions", []))))
                 self._emit(("refresh_versions",))
@@ -381,7 +651,7 @@ class App:
         if not self.manifest:
             return
         kind = {"正式版": "release", "快照": "snapshot", "全部": "all"}.get(self.var_type.get(), "release")
-        keyword = self.var_search.get().strip().lower()
+        keyword = normalize_keyword(self.var_search.get()).strip().lower()
         items = [v for v in self.manifest.get("versions", [])
                  if (kind == "all" or v.get("type") == kind)]
         if keyword:
@@ -409,7 +679,7 @@ class App:
             return None
         return str(self.tree.item(selection[0], "values")[0])
 
-    # ---- 加载器版本 --------------------------------------------------
+    # ---- 加载器 ------------------------------------------------------
 
     def _loader_key(self) -> str:
         label = self.var_loader.get()
@@ -422,8 +692,14 @@ class App:
         key = self._loader_key()
         self._loader_seq += 1
         seq = self._loader_seq
-        self.var_loader_version.set(AUTO)
-        self.combo_loader_version.configure(values=[AUTO], state="readonly")
+        self.var_loader_version.set(AUTO_LATEST)
+        self.combo_loader_version.configure(values=[AUTO_LATEST], state="readonly")
+
+        if key == "fabric":
+            self.fabric_frame.pack(fill="x", pady=(6, 0))
+        else:
+            self.fabric_frame.pack_forget()
+            self.var_fabric_api.set(False)
 
         if key == "none":
             self.lbl_loader_hint.configure(text="选择加载器后会联网列出可用版本；Forge / NeoForge 需要本机有 Java 17 或 21。")
@@ -433,102 +709,209 @@ class App:
         if not game:
             return
         self.lbl_loader_hint.configure(text="正在查询 %s 支持 %s 的版本…" % (key, game))
+        mirror = self._selected_mirror()
 
         def work():
-            mirror = Mirror(BMCLAPI if self.var_mirror.get() == "bmclapi" else OFFICIAL)
             try:
-                values = self._list_loader_versions(key, game, mirror)
+                items, has_stability = self._fetch_loader_versions(key, game, mirror)
             except Exception as exc:  # noqa: BLE001
-                values = []
+                items, has_stability = [], False
                 self._emit(("log", "查询加载器版本失败：%s" % exc))
+            if key == "fabric":
+                try:
+                    self._emit(("fabric_api", game, mods.list_fabric_api(game)))
+                except Exception as exc:  # noqa: BLE001
+                    self._emit(("log", "查询 Fabric API 版本失败：%s" % exc))
             if seq != self._loader_seq:
                 return
-            self._emit(("loader_versions", key, game, values))
+            self._emit(("loader_versions", key, game, items, has_stability))
 
         threading.Thread(target=work, daemon=True).start()
 
-    def _list_loader_versions(self, key: str, game: str, mirror: Mirror) -> List[str]:
-        from .net import fetch_json
+    def _fetch_loader_versions(self, key: str, game: str, mirror: Mirror) -> Tuple[List[Tuple[str, bool]], bool]:
+        """返回 ([(版本号, 是否稳定)], 是否能区分正式/测试)。"""
+        cached = self._loader_cache.get((key, game))
+        if cached:
+            return cached
+
+        items: List[Tuple[str, bool]] = []
+        has_stability = False
 
         if key == "fabric":
             data = fetch_json(["https://meta.fabricmc.net/v2/versions/loader/%s" % game])
-            return [item["loader"]["version"] for item in data][:40]
-        if key == "quilt":
+            for item in data:
+                info = item.get("loader") or {}
+                if info.get("version"):
+                    items.append((info["version"], bool(info.get("stable", True))))
+            has_stability = True
+        elif key == "quilt":
             data = fetch_json(["https://meta.quiltmc.org/v3/versions/loader/%s" % game])
-            return [item["loader"]["version"] for item in data][:40]
-        if key == "forge":
+            for item in data:
+                info = item.get("loader") or {}
+                if info.get("version"):
+                    items.append((info["version"], True))
+            has_stability = False
+        elif key == "forge":
             promos = fetch_json([loader_mod.FORGE_PROMOS]).get("promos", {})
-            values = []
-            for suffix in ("recommended", "latest"):
-                value = promos.get("%s-%s" % (game, suffix))
-                if value and value not in values:
-                    values.append(value)
-            return values
-        if key == "neoforge":
-            return [loader_mod.resolve_neoforge_version(game, mirror)]
-        return []
+            recommended = promos.get("%s-recommended" % game)
+            latest = promos.get("%s-latest" % game)
+            if latest:
+                items.append((latest, latest == recommended))
+            if recommended and recommended != latest:
+                items.append((recommended, True))
+            has_stability = bool(latest and recommended and latest != recommended)
+        elif key == "neoforge":
+            for version in loader_mod.list_neoforge_versions(game, mirror):
+                items.append((version, "-" not in version))
+            has_stability = any("-" in version for version, _stable in items)
 
-    def _apply_loader_versions(self, key: str, game: str, values: List[str]) -> None:
+        result = (items, has_stability)
+        self._loader_cache[(key, game)] = result
+        return result
+
+    def _apply_loader_versions(self, key: str, game: str, items: List[Tuple[str, bool]], has_stability: bool) -> None:
         if self._loader_key() != key or self._selected_version() != game:
             return
-        if not values:
-            self.combo_loader_version.configure(values=[AUTO], state="readonly")
-            self.lbl_loader_hint.configure(text="没有查到可用版本，将使用“%s”自动选择。" % AUTO)
+        versions = [version for version, _stable in items]
+
+        if len(versions) == 1:
+            label = versions[0] + UNIQUE_SUFFIX
+            self.combo_loader_version.configure(values=[label], state="readonly")
+            self.var_loader_version.set(label)
+            self.lbl_loader_hint.configure(text="该游戏版本只有 %s 一个可选加载器版本。" % versions[0])
             return
-        self.combo_loader_version.configure(values=[AUTO] + values, state="readonly")
-        self.lbl_loader_hint.configure(text="共 %d 个可选版本；Forge / NeoForge 安装需要 Java 17 或 21。" % len(values))
+        if not versions:
+            self.combo_loader_version.configure(values=[AUTO_LATEST], state="readonly")
+            self.var_loader_version.set(AUTO_LATEST)
+            self.lbl_loader_hint.configure(text="没有查到可用版本，将按“%s”自动选择。" % AUTO_LATEST)
+            return
+
+        autos = [AUTO_RELEASE, AUTO_BETA] if has_stability else [AUTO_LATEST]
+        self.combo_loader_version.configure(values=autos + versions, state="readonly")
+        self.var_loader_version.set(autos[0])
+        if has_stability:
+            stable = [version for version, is_stable in items if is_stable]
+            unstable = [version for version, is_stable in items if not is_stable]
+            parts = []
+            if stable:
+                parts.append("正式版最新 %s" % stable[0])
+            if unstable:
+                parts.append("测试版最新 %s" % unstable[0])
+            self.lbl_loader_hint.configure(
+                text="共 %d 个可选版本（%s）；Forge、NeoForge 安装需要 Java 17 或 21。"
+                     % (len(items), "，".join(parts) or "无"))
+        else:
+            self.lbl_loader_hint.configure(
+                text="共 %d 个版本；该来源无法区分正式/测试版，只提供“最新”。" % len(items))
+
+    def _resolve_loader_version(self, key: str, game: str, choice: str) -> Optional[str]:
+        if choice.endswith(UNIQUE_SUFFIX):
+            return choice[: -len(UNIQUE_SUFFIX)]
+        if choice not in (AUTO_RELEASE, AUTO_BETA, AUTO_LATEST):
+            return choice or None
+        items = self._loader_cache.get((key, game), ([], False))[0]
+        if not items:
+            return None
+        if choice == AUTO_BETA:
+            for version, stable in items:
+                if not stable:
+                    return version
+        if choice == AUTO_RELEASE:
+            for version, stable in items:
+                if stable:
+                    return version
+        return items[0][0]
+
+    # ---- Fabric API --------------------------------------------------
+
+    def _on_fabric_api_toggle(self) -> None:
+        self.combo_fabric_api.configure(state="readonly" if self.var_fabric_api.get() else "disabled")
+
+    def _apply_fabric_api(self, game: str, items: List[dict]) -> None:
+        if self._selected_version() != game or self._loader_key() != "fabric":
+            return
+        self._fabric_cache[game] = items
+        if not items:
+            self.combo_fabric_api.configure(values=["最新"], state="disabled")
+            self.var_fabric_api_version.set("最新")
+            self.var_fabric_api.set(False)
+            return
+        self.combo_fabric_api.configure(values=["最新"] + [item["version_number"] for item in items])
+        self.var_fabric_api_version.set("最新")
+        if self.var_fabric_api.get():
+            self.combo_fabric_api.configure(state="readonly")
+
+    def _fabric_api_choice(self, game: str) -> Optional[str]:
+        if not self.var_fabric_api.get():
+            return None
+        choice = self.var_fabric_api_version.get()
+        return None if choice in ("", "最新") else choice
 
     # ---- 开始下载 ----------------------------------------------------
 
     def _start(self) -> None:
         if self.busy:
             return
-        is_pack = self.notebook.index(self.notebook.select()) == 1
-        if is_pack:
+        index = self.notebook.index(self.notebook.select())
+        if index == 2:
+            self._start_custom()
+            return
+
+        if index == 1:
             source = self.var_pack.get().strip()
             if not source:
                 messagebox.showwarning("缺少整合包", "请填写 Modrinth 项目 slug / 链接，或选择 .mrpack 文件。")
                 return
-            job = dict(kind="pack", source=source)
+            job = {"kind": "pack", "source": source}
         else:
             game = self._selected_version()
             if not game:
                 messagebox.showwarning("未选择版本", "请先在列表里选中一个 Minecraft 版本。")
                 return
-            job = dict(kind="version", game=game, loader=self._loader_key(),
-                       loader_version=self.var_loader_version.get())
+            loader = self._loader_key()
+            loader_version = self._resolve_loader_version(loader, game, self.var_loader_version.get()) \
+                if loader != "none" else None
+            job = {"kind": "version", "game": game, "loader": loader, "loader_version": loader_version,
+                   "fabric_api": self._fabric_api_choice(game) if loader == "fabric" else None}
 
-        game_dir = os.path.abspath(self.var_dir.get().strip() or "minecraft")
-        try:
-            os.makedirs(game_dir, exist_ok=True)
-        except OSError as exc:
-            messagebox.showerror("目录不可用", "无法创建目录：\n%s\n%s" % (game_dir, exc))
+        self._on_dir_changed()
+        game_dir = os.path.abspath(self.var_dir.get().strip() or default_game_dir()[0])
+        ok, reason = probe_writable(game_dir)
+        if not ok:
+            messagebox.showerror("目录不可写", reason)
             return
 
-        options = dict(
-            game_dir=game_dir,
-            mirror=Mirror(BMCLAPI if self.var_mirror.get() == "bmclapi" else OFFICIAL),
-            threads=max(1, int(self.var_threads.get() or 8)),
-            skip_assets=bool(self.var_skip_assets.get()),
-        )
+        job["isolate"] = bool(self.var_isolate.get())
+        options = dict(game_dir=game_dir, mirror=self._selected_mirror(),
+                       threads=max(1, int(self.var_threads.get() or 8)),
+                       skip_assets=bool(self.var_skip_assets.get()))
+        self._remember_settings(game_dir, options)
         self._set_busy(True)
         self.progress["value"] = 0
         self._append_log("=" * 60)
         self._append_log("目标目录：%s" % game_dir)
         self._append_log("下载源：%s" % options["mirror"].label)
+        self._append_log("版本隔离：%s" % ("开启" if job["isolate"] else "关闭"))
         threading.Thread(target=self._run_job, args=(job, options), daemon=True).start()
+
+    def _remember_settings(self, game_dir: str, options: Dict) -> None:
+        try:
+            self.settings.update({"game_dir": game_dir, "mirror": self.var_mirror.get(),
+                                  "threads": options["threads"],
+                                  "isolate": bool(self.var_isolate.get())})
+            config.save(self.settings)
+        except Exception:  # noqa: BLE001
+            pass
 
     def _run_job(self, job: Dict, options: Dict) -> None:
         reporter = GuiReporter(self._emit)
+        isolate = bool(job.get("isolate"))
         try:
             if job["kind"] == "pack":
                 result = modpack.install(
-                    job["source"],
-                    game_dir=options["game_dir"],
-                    mirror=options["mirror"],
-                    threads=options["threads"],
-                    reporter=reporter,
-                    skip_assets=options["skip_assets"],
+                    job["source"], game_dir=options["game_dir"], mirror=options["mirror"],
+                    threads=options["threads"], reporter=reporter, skip_assets=options["skip_assets"],
+                    content_root=None if not isolate else self._guess_pack_root(job["source"], options["game_dir"]),
                 )
             else:
                 game = job["game"]
@@ -537,9 +920,7 @@ class App:
                                 skip_assets=options["skip_assets"], context=Context())
                 result = {"version": game}
                 loader = job["loader"]
-                loader_version = job["loader_version"]
-                if loader_version == AUTO:
-                    loader_version = None
+                loader_version = job.get("loader_version")
                 if loader != "none":
                     if loader == "fabric":
                         info = loader_mod.install_fabric(game, loader_version, options["game_dir"],
@@ -559,6 +940,11 @@ class App:
                                                           options["threads"], reporter, options["skip_assets"])
                     result.update(info)
 
+                    if loader == "fabric" and job.get("fabric_api") is not None:
+                        mods_dir = os.path.join(content_root(options["game_dir"], info.get("id"), isolate), "mods")
+                        api = mods.install_fabric_api(game, mods_dir, job.get("fabric_api"), reporter=reporter)
+                        result["fabric_api"] = api["fabric_api"]
+
             result["bytes"] = reporter.total_bytes
             result["files"] = reporter.done_files
             self._emit(("log", "完成。"))
@@ -567,9 +953,65 @@ class App:
                 DownloadError, RuntimeError) as exc:
             self._emit(("log", "错误：%s" % exc))
             self._emit(("done", {"error": str(exc)}))
-        except Exception as exc:  # noqa: BLE001 - 未预期错误也要回传界面
+        except Exception as exc:  # noqa: BLE001
             self._emit(("log", "未预期错误：%s\n%s" % (exc, traceback.format_exc())))
             self._emit(("done", {"error": str(exc)}))
+
+    def _guess_pack_root(self, source: str, game_dir: str) -> Optional[str]:
+        """整合包隔离开启时，内容写到 versions/<加载器版本>；解析失败则不隔离。"""
+        try:
+            zip_path, _meta = modpack.resolve_source(source, game_dir, reporter=None)
+            index = modpack.read_index(zip_path)
+            dependencies = index.get("dependencies") or {}
+            loader, loader_version = modpack.loader_from_dependencies(dependencies)
+            game = dependencies.get("minecraft", "")
+            version_id = expected_version_id(loader or "none", loader_version, game)
+            return content_root(game_dir, version_id, True)
+        except Exception:  # noqa: BLE001
+            return None
+
+    # ---- 自定义下载 --------------------------------------------------
+
+    def _start_custom(self) -> None:
+        url = self.var_custom_url.get().strip()
+        if not url:
+            messagebox.showwarning("缺少链接", "请先填写要下载的链接。")
+            return
+        dest_dir = self.var_custom_dest.get().strip() or os.path.join(os.path.abspath(self.var_dir.get()), "downloads")
+        filename = self.var_custom_name.get().strip()
+        dest = os.path.join(dest_dir, filename) if filename else dest_dir
+        self._set_busy(True)
+        self.progress["value"] = 0
+        threading.Thread(target=self._run_custom, args=(url, dest), daemon=True).start()
+
+    def _run_custom(self, url: str, dest: str) -> None:
+        reporter = GuiReporter(self._emit)
+        try:
+            path = mods.download_url(url, dest, reporter=reporter)
+            self._emit(("log", "已保存：%s" % path))
+            if mods.read_mrpack_index(path):
+                self._emit(("ask_mrpack", path))
+            else:
+                self._emit(("done", {"custom": path, "bytes": reporter.total_bytes}))
+        except Exception as exc:  # noqa: BLE001
+            self._emit(("log", "下载失败：%s" % exc))
+            self._emit(("done", {"error": str(exc)}))
+
+    def _ask_install_mrpack(self, path: str) -> None:
+        self._set_busy(False)
+        if messagebox.askyesno("这是整合包", "下载完成：\n%s\n\n要直接按整合包安装到当前目录吗？" % path):
+            self._set_busy(True)
+            options = dict(game_dir=os.path.abspath(self.var_dir.get()), mirror=self._selected_mirror(),
+                           threads=max(1, int(self.var_threads.get() or 8)),
+                           skip_assets=bool(self.var_skip_assets.get()))
+            threading.Thread(target=self._run_job,
+                             args=({"kind": "pack", "source": path, "isolate": bool(self.var_isolate.get())},
+                                   options), daemon=True).start()
+        else:
+            self.progress["value"] = 0
+            self.lbl_status.configure(text="完成")
+
+    # ---- 结束 --------------------------------------------------------
 
     def _on_finished(self, result: Dict) -> None:
         self._set_busy(False)
@@ -580,9 +1022,12 @@ class App:
             return
         self.progress["value"] = 100
         self.lbl_status.configure(text="完成")
+        if result.get("custom"):
+            self._append_log("保存位置：%s" % result["custom"])
+            return
         target = result.get("dir") or os.path.abspath(self.var_dir.get())
         lines = [("目录", target)]
-        for key in ("version", "loader", "loader_version", "id", "pack", "files"):
+        for key in ("version", "loader", "loader_version", "fabric_api", "id", "pack", "files"):
             if result.get(key):
                 lines.append((key, result[key]))
         if result.get("bytes"):
@@ -593,11 +1038,52 @@ class App:
             if messagebox.askyesno("下载完成", text + "\n\n要打开目录吗？"):
                 self._open_dir()
 
+    # ---- 首次启动提示 ------------------------------------------------
+
+    def _maybe_show_license_notice(self) -> None:
+        if self.self_test or self.settings.get("license_notice"):
+            return
+        window = tk.Toplevel(self.root)
+        window.title(APP_TITLE)
+        window.resizable(False, False)
+        window.transient(self.root)
+        frame = ttk.Frame(window, padding=18)
+        frame.pack(fill="both", expand=True)
+        ttk.Label(frame, text="使用提示", style="H1.TLabel").pack(anchor="w")
+        ttk.Label(frame, text=LICENSE_TEXT, justify="left", wraplength=460).pack(anchor="w", pady=(10, 16))
+
+        def close() -> None:
+            self.settings["license_notice"] = True
+            try:
+                config.save(self.settings)
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                window.grab_release()
+            except tk.TclError:
+                pass
+            window.destroy()
+
+        buttons = ttk.Frame(frame)
+        buttons.pack(fill="x")
+        ttk.Button(buttons, text="获取正版",
+                   command=lambda: (webbrowser.open(LICENSE_URL), close())).pack(side="left")
+        ttk.Button(buttons, text="我是正版用户", command=close).pack(side="right")
+        window.protocol("WM_DELETE_WINDOW", close)
+        window.update_idletasks()
+        x = self.root.winfo_rootx() + max(0, (self.root.winfo_width() - window.winfo_width()) // 2)
+        y = self.root.winfo_rooty() + max(0, (self.root.winfo_height() - window.winfo_height()) // 3)
+        window.geometry("+%d+%d" % (x, y))
+        try:
+            window.grab_set()
+        except tk.TclError:
+            pass
+
     # ---- 自检 --------------------------------------------------------
 
     def _finish_self_test(self) -> None:
-        print("SELF-TEST OK: versions=%d, tab=%s, dir=%s" % (
-            len(self.versions), self.notebook.index(self.notebook.select()), self.var_dir.get()))
+        print("SELF-TEST OK: versions=%d tabs=%d dir=%s isolate=%s" % (
+            len(self.versions), len(self.notebook.tabs()), self.var_dir.get(), self.var_isolate.get()))
         self.root.destroy()
 
 
@@ -616,7 +1102,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             pass
 
     root = tk.Tk()
-    app = App(root, self_test=self_test, auto_close_ms=1200 if self_test else None)
+    app = App(root, self_test=self_test, auto_close_ms=1500 if self_test else None)
     try:
         root.lift()
         root.attributes("-topmost", True)
@@ -624,7 +1110,6 @@ def main(argv: Optional[List[str]] = None) -> int:
     except tk.TclError:
         pass
     if not self_test:
-        # 窗口程序的 stdout 不可用，重定向到日志框
         sys.stdout = _Stream(app._emit)  # type: ignore[assignment]
         sys.stderr = _Stream(app._emit)  # type: ignore[assignment]
     root.mainloop()

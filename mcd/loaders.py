@@ -390,23 +390,25 @@ def _version_key(text: str):
     return tuple(parts)
 
 
-def resolve_neoforge_version(
-    game: str,
-    mirror: Optional[Mirror] = None,
-    proxy: Optional[str] = None,
-    include_beta: bool = False,
-) -> str:
-    """NeoForge 版本号与游戏版本对应：1.21.1 -> 21.1.x。"""
-    mirror = mirror or Mirror()
+def _neoforge_prefix(game: str) -> str:
     pieces = game.split(".")
     if pieces[0] == "1" and len(pieces) >= 3:
         # 旧体系：1.21.1 -> 21.1.x
-        prefix = "%s.%s." % (pieces[1], pieces[2])
-    else:
-        # 新体系（2026 起）：26.3 -> 26.3.x.y
-        prefix = game + "."
-    if len(pieces) < 2:
+        return "%s.%s." % (pieces[1], pieces[2])
+    # 新体系（2026 起）：26.3 -> 26.3.x.y
+    return game + "."
+
+
+def list_neoforge_versions(
+    game: str,
+    mirror: Optional[Mirror] = None,
+    proxy: Optional[str] = None,
+) -> List[str]:
+    """返回该游戏版本对应的 NeoForge 版本号（从旧到新），包含测试版。"""
+    mirror = mirror or Mirror()
+    if len(game.split(".")) < 2:
         raise InstallError("无法从 %r 推断 NeoForge 版本，请用 --loader-version 指定" % game)
+    prefix = _neoforge_prefix(game)
 
     names: List[str] = []
     if mirror.is_mirror:
@@ -430,13 +432,25 @@ def resolve_neoforge_version(
         if not name.startswith(prefix):
             continue
         key = _version_key(name)
-        if key is None and not include_beta:
-            continue
         usable.append((key or (0,), name))
-    if not usable:
-        raise InstallError("NeoForge 没有对应 %s 的版本（前缀 %s）" % (game, prefix))
     usable.sort()
-    return usable[-1][1]
+    return [name for _key, name in usable]
+
+
+def resolve_neoforge_version(
+    game: str,
+    mirror: Optional[Mirror] = None,
+    proxy: Optional[str] = None,
+    include_beta: bool = False,
+) -> str:
+    """NeoForge 版本号与游戏版本对应：1.21.1 -> 21.1.x，26.3 -> 26.3.x.y。"""
+    versions = list_neoforge_versions(game, mirror=mirror, proxy=proxy)
+    if not versions:
+        raise InstallError("NeoForge 没有对应 %s 的版本" % game)
+    if include_beta:
+        return versions[-1]
+    stable = [item for item in versions if _version_key(item) is not None]
+    return (stable or versions)[-1]
 
 
 def install_neoforge(

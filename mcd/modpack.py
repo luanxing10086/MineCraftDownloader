@@ -192,10 +192,14 @@ def install(
     java_path: Optional[str] = None,
     dry_run: bool = False,
     context: Optional[Context] = None,
+    content_root: Optional[str] = None,
 ) -> Dict:
     mirror = mirror or Mirror()
     context = context or Context()
     os.makedirs(game_dir, exist_ok=True)
+    # 版本隔离开启时，mods/config 等放到 versions/<版本>/ 下；原版与库仍装到 game_dir
+    content_root = content_root or game_dir
+    os.makedirs(content_root, exist_ok=True)
 
     zip_path, meta = resolve_source(source, game_dir, proxy=proxy, reporter=reporter)
     index = read_index(zip_path)
@@ -250,7 +254,7 @@ def install(
             continue
         hashes = item.get("hashes") or {}
         tasks.append({
-            "dest": _safe_target(game_dir, item["path"]),
+            "dest": _safe_target(content_root, item["path"]),
             "urls": downloads,
             "sha1": hashes.get("sha1"),
             "size": item.get("fileSize"),
@@ -261,10 +265,10 @@ def install(
         raise ModpackError("整合包文件下载失败：\n  " + "\n  ".join(failures[:8]))
 
     # 4) overrides
-    extracted = extract_overrides(zip_path, game_dir)
+    extracted = extract_overrides(zip_path, content_root)
 
     # 5) 留一份 index 便于追溯与后续更新
-    index_copy = os.path.join(game_dir, "modrinth.index.json")
+    index_copy = os.path.join(content_root, "modrinth.index.json")
     with open(index_copy, "w", encoding="utf-8") as handle:
         json.dump(index, handle, ensure_ascii=False, indent=2)
 

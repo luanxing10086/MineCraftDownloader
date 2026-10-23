@@ -8,21 +8,73 @@
 
 **Windows 图形界面版（推荐）**：[Releases › v0.1.0](https://github.com/luanxing10086/MineCraftDownloader/releases/latest) → `MCD-GUI-win64.zip`（解压即用）
 
-同页面还有单文件版 `MCD-GUI.exe`（方便，但运行时要自解压到 `%TEMP%`，部分安全软件会拦截）和命令行版 `MCD.exe`。
+| 文件 | 说明 |
+|---|---|
+| `MCD-GUI-win64.zip` | **最稳**：onedir 结构，运行时不解压任何东西 |
+| `MCD-GUI-portable.exe` | 单文件，但解压目录是**自己所在的文件夹**，不碰 `%TEMP%` |
+| `MCD-GUI.exe` | 单文件，解压到 `%TEMP%`；部分机器上会被安全策略拦截（见下方 FAQ） |
+| `MCD.exe` | 命令行版 |
 
 解压后双击 `MCD-GUI.exe` 即开窗口：左边选版本、右边选加载器，底部设目录/下载源，点“开始下载”。
+
+### FAQ：双击报 `could not create temporary directory`
+
+`MCD-GUI.exe` 是单文件版，启动时要把自身解压到 `%TEMP%`。如果系统不允许“未受信任签名的程序写系统盘”，
+解压就会失败并弹出这个提示（杀软日志里可能什么都看不到）。
+
+按顺序尝试：改用 `MCD-GUI-win64.zip`（完全不解压）→ 或 `MCD-GUI-portable.exe`（解压到自身目录）→
+或把 `TEMP`/`TMP` 指到非系统盘再运行。
 
 ## 图形界面
 
 ![界面](docs/gui.png)
 
-- **版本列表**：从 Mojang / BMCLAPI 拉取，支持“正式版 / 快照 / 全部”过滤和关键字搜索，双击某行直接开始
-- **加载器**：无 / Fabric / Quilt / Forge / NeoForge，选中后自动联网列出该游戏版本可用的加载器版本，默认“自动（推荐）”
-- **整合包**：另一个标签页，填 Modrinth slug、页面链接或选本地 `.mrpack`
-- **下载选项**：安装目录、官方源 / BMCLAPI、跳过 assets、并发数
+- **版本列表**：从 Mojang / BMCLAPI 拉取，支持“正式版 / 快照 / 全部”过滤和关键字搜索（`1.20.1` 里的小数点可以直接输入），双击某行直接开始
+- **加载器**：无 / Fabric / Quilt / Forge / NeoForge；能区分正式/测试版的来源给出“最新正式版（自动）”“最新测试版（自动）”，分不出的只给“最新（自动）”，只有一个可选版本时直接标 `- 唯一`
+- **Fabric API**：选 Fabric 时可勾选一并安装，并可选具体版本（数据来自 Modrinth）
+- **整合包**：另一个标签页，填 Modrinth slug、页面链接或选本地 `.mrpack`；页面内写明了暂不支持 CurseForge 的原因
+- **自定义下载**：第三个标签页，粘贴任意 http/https 链接存到指定位置；下载到 `.mrpack` 会额外询问是否直接安装
+- **版本隔离**：开启后内容写到 `versions/<版本>/`，与 PCL / HMCL 的隔离目录结构一致；切换安装目录时会按特征自动判定并切换
+- **下载源**：BMCLAPI / Mojang 官方 / 导入的自定义源（JSON 模板）
+- **首次启动**：提示仅面向正版用户，两个按钮（获取正版 / 我是正版用户），确认后不再弹出
 - **日志与进度**：实时显示每个文件的下载进度，完成后可直接打开目录
 
 界面用 tkinter（Python 标准库），不引入任何第三方依赖。
+
+## 版本隔离
+
+开启后，整合包内容与 Fabric API 会落到 `versions/<版本>/`（`mods/`、`config/` 等），与 PCL、HMCL 的“版本隔离”目录结构一致。
+
+自动判定规则（切换安装目录时触发）：
+
+* `versions/<某版本>/mods|config|saves` 或 `versions/<版本>/.minecraft` 存在 → 视为**开启**
+* 根目录有 `mods/`、版本目录里没有隔离结构 → 视为**关闭**
+* 都没有对应特征 → 不自动切换，保持当前设置
+
+> 隔离只影响**下载内容写到哪里**；游戏启动时的存档与配置重定向由启动器负责。
+> 请确保启动器里的版本隔离设置与这里一致，否则可能加载不到模组。
+
+## 自定义下载源
+
+“下载源 → 导入…” 选择一个 JSON：
+
+```json
+{
+  "name": "我的镜像",
+  "base": "https://mirror.example.com",
+  "templates": {
+    "manifest": "{base}/mc/game/version_manifest_v2.json",
+    "version_json": "{base}/version/{id}/json",
+    "client": "{base}/version/{id}/client"
+  },
+  "rules": [
+    ["https://libraries.minecraft.net/", "{base}/maven/"],
+    ["https://resources.download.minecraft.net/", "{base}/assets/"]
+  ]
+}
+```
+
+`templates` 与 `rules` 都可省略；缺失或命中 404 时自动回退官方地址，所以规则写错不会导致完全不可用。
 
 ## 从源码运行 GUI
 
@@ -37,6 +89,7 @@ python -m mcd.gui
 | 原版 | 任意正式版 / 快照，含 client jar、libraries、assets、log4j 配置、老版本 natives |
 | 带加载器 | Fabric、Quilt（直装，无需 Java）、Forge、NeoForge（调官方 installer） |
 | 整合包 | Modrinth `.mrpack`：本地文件、直链、项目 slug、`slug@版本` |
+| 附加 | Fabric API（可选，来自 Modrinth）；任意 URL 的自定义下载 |
 
 ## 环境要求
 
