@@ -6,11 +6,11 @@
 
 ## 下载
 
-**Windows 图形界面版（推荐）**：[Releases › v0.1.0](https://github.com/luanxing10086/MineCraftDownloader/releases/latest) → `MCD-GUI.exe`
+**Windows 图形界面版（推荐）**：[Releases › v0.1.0](https://github.com/luanxing10086/MineCraftDownloader/releases/latest) → `MCD-GUI-win64.zip`（解压即用）
 
-**命令行版**：同页面的 `MCD.exe`
+同页面还有单文件版 `MCD-GUI.exe`（方便，但运行时要自解压到 `%TEMP%`，部分安全软件会拦截）和命令行版 `MCD.exe`。
 
-双击 `MCD-GUI.exe` 即开窗口：左边选版本、右边选加载器，底部设目录/下载源，点“开始下载”。
+解压后双击 `MCD-GUI.exe` 即开窗口：左边选版本、右边选加载器，底部设目录/下载源，点“开始下载”。
 
 ## 图形界面
 
@@ -201,9 +201,9 @@ tests/          28 个单元测试
   这是缺少证书的正常现象，不是文件有问题。可核对 release 里的 SHA256，或从源码运行（`python -m mcd`）。
   想在本机消除提示，可自行生成自签名证书签名（见仓库外的 `scripts/sign-exe.ps1` 思路），
   或申请真证书 / 开源项目免费签名（SignPath）。
-* 单文件 exe 启动时会把自身解压到 `%TEMP%`。若临时目录不可写（公司策略、清理工具、受限账户），
-  会弹出一个标题为 “Error” 的对话框并提示 `Could not create temporary directory`。
-  这时把 `TEMP`/`TMP` 指到可写目录再运行，或改用源码方式（`python -m mcd.gui`）。
+* 单文件 exe 启动时会把自身解压到 `%TEMP%`。若临时目录不可写，或安全软件拦截“未签名程序在临时目录
+  释放 DLL”，会弹出标题为 “Error” 的对话框并提示 `Could not create temporary directory`。
+  **解决办法：改用 `MCD-GUI-win64.zip`（onedir 版，运行时不解压）**，或改用源码方式（`python -m mcd.gui`）。
 * MIT License。
 
 ## 后记

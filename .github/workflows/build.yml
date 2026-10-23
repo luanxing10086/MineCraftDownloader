@@ -1,7 +1,8 @@
 name: build
 
-# 在 CI 里从源码出包（SignPath 对开源项目签名的硬性要求：产物必须可验证地构建自源码）。
-# 产物以 artifact 形式上传，不进 Release；需要发版时再人工确认后附加到 Release。
+# 从源码出包（SignPath 对开源项目签名的硬性要求：产物必须可验证地构建自源码）。
+# 三个产物：单文件 CLI、单文件 GUI、onedir GUI（zip，运行时不解压到 %TEMP%）。
+# 全部以 artifact 形式上传，不进 Release；发版时人工确认后再附加。
 
 on:
   push:
@@ -22,10 +23,14 @@ jobs:
         include:
           - name: MCD
             entry: tools/mcd_entry.py
-            mode: --console
+            mode: --onefile --console
           - name: MCD-GUI
             entry: tools/gui_entry.py
-            mode: --windowed
+            mode: --onefile --windowed
+          - name: MCD-GUI-win64
+            entry: tools/gui_entry.py
+            mode: --onedir --windowed
+            archive: zip
     steps:
       - uses: actions/checkout@v4
 
@@ -40,7 +45,7 @@ jobs:
 
       - name: Build ${{ matrix.name }}
         run: >
-          pyinstaller ${{ matrix.mode }} --onefile --noconfirm
+          pyinstaller ${{ matrix.mode }} --noconfirm
           --name ${{ matrix.name }}
           --paths .
           --distpath dist
@@ -51,21 +56,29 @@ jobs:
         if: matrix.name == 'MCD'
         run: .\dist\MCD.exe --version
 
-      - name: Checksum
+      - name: Package and checksum
         shell: pwsh
         run: |
-          $exe = "dist/${{ matrix.name }}.exe"
-          if (-not (Test-Path $exe)) { throw "missing $exe" }
-          $hash = (Get-FileHash $exe -Algorithm SHA256).Hash.ToLower()
-          $size = (Get-Item $exe).Length
-          Write-Host "$exe  $size bytes  sha256=$hash"
-          "$hash *${{ matrix.name }}.exe" | Set-Content "dist/${{ matrix.name }}.exe.sha256" -Encoding ASCII
+          $name = "${{ matrix.name }}"
+          $archive = "${{ matrix.archive }}"
+          if ($archive -eq "zip") {
+            Compress-Archive -Path "dist/$name/*" -DestinationPath "dist/$name.zip" -Force
+            $target = "dist/$name.zip"
+          } else {
+            $target = "dist/$name.exe"
+          }
+          if (-not (Test-Path $target)) { throw "missing $target" }
+          $hash = (Get-FileHash $target -Algorithm SHA256).Hash.ToLower()
+          $size = (Get-Item $target).Length
+          Write-Host "$target  $size bytes  sha256=$hash"
+          "$hash *$(Split-Path $target -Leaf)" | Set-Content "$target.sha256" -Encoding ASCII
+          New-Item -ItemType Directory -Force out | Out-Null
+          Copy-Item $target out/
+          Copy-Item "$target.sha256" out/
 
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.name }}
-          path: |
-            dist/${{ matrix.name }}.exe
-            dist/${{ matrix.name }}.exe.sha256
+          path: out/
           if-no-files-found: error
           retention-days: 14
