@@ -77,9 +77,15 @@ def load_manifest(
     proxy: Optional[str] = None,
     max_age: int = 3600,
     refresh: bool = False,
+    cache_dir: Optional[str] = None,
 ) -> dict:
-    """带 1 小时缓存的版本清单，离线时回退到旧缓存。"""
-    cache = _manifest_cache_path(game_dir)
+    """带 1 小时缓存的版本清单，离线时回退到旧缓存。
+
+    cache_dir 用于把缓存放到别处（GUI 在用户还没确认安装目录时用），
+    避免仅仅为了拉清单就把 .minecraft 目录建出来。
+    """
+    cache = (os.path.join(cache_dir, "version_manifest_v2.json")
+             if cache_dir else _manifest_cache_path(game_dir))
     if not refresh and os.path.exists(cache) and time.time() - os.path.getmtime(cache) < max_age:
         try:
             with open(cache, "r", encoding="utf-8") as handle:
@@ -96,9 +102,13 @@ def load_manifest(
                 return json.load(handle)
         raise
 
-    os.makedirs(os.path.dirname(cache), exist_ok=True)
-    with open(cache, "w", encoding="utf-8") as handle:
-        json.dump(manifest, handle)
+    # 缓存写不进去不影响使用（例如系统禁止程序写系统盘时）
+    try:
+        os.makedirs(os.path.dirname(cache), exist_ok=True)
+        with open(cache, "w", encoding="utf-8") as handle:
+            json.dump(manifest, handle)
+    except OSError:
+        pass
     return manifest
 
 

@@ -15,3 +15,5 @@ htmlcov/
 minecraft/
 .test/
 *.mrpack
+
+data/

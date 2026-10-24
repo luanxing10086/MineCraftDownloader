@@ -31,6 +31,7 @@ from .rules import Context
 
 APP_TITLE = "MCD"
 HEADER_TEXT = "Minecraft 下载器"
+DIR_PLACEHOLDER = "未选择"
 
 AUTO_RELEASE = "最新正式版（自动）"
 AUTO_BETA = "最新测试版（自动）"
@@ -59,17 +60,77 @@ def launcher_dir() -> str:
 
 
 def probe_writable(directory: str) -> Tuple[bool, str]:
-    """目录是否可写；不可写时返回原因。"""
-    try:
-        if not os.path.isdir(directory):
+    """目录是否可写；不可写时返回具体原因（区分“建不出来”和“建得出但写不进”）。"""
+    if not os.path.isdir(directory):
+        try:
             os.makedirs(directory, exist_ok=True)
-        probe = os.path.join(directory, ".mcd-write-test")
+        except OSError as exc:
+            return False, "无法创建目录 %s（错误 %s：%s）" % (
+                directory, getattr(exc, "winerror", None) or exc.errno, exc.strerror or exc)
+    probe = os.path.join(directory, ".mcd-write-test")
+    try:
         with open(probe, "w", encoding="utf-8") as handle:
             handle.write("ok")
-        os.remove(probe)
-        return True, ""
     except OSError as exc:
-        return False, "%s（%s）" % (exc.strerror or exc, directory)
+        return False, "目录存在但不可写 %s（错误 %s：%s）" % (
+            directory, getattr(exc, "winerror", None) or exc.errno, exc.strerror or exc)
+    finally:
+        try:
+            os.remove(probe)
+        except OSError:
+            pass
+    return True, ""
+
+
+def write_error_tip() -> str:
+    return (
+        "常见原因与处理：\n"
+        "  · 选到了 Program Files 等受保护目录 → 换到非系统盘或用户目录；\n"
+        "  · Windows 安全中心的“受控文件夹访问”拦了写入 → 允许本程序或换个目录；\n"
+        "  · 目录属于其他账户 / 只读盘 → 换到当前用户可写的位置；\n"
+        "  · 便携版放在 U 盘中且被写保护 → 去掉写保护后重试。"
+    )
+
+
+def open_external(url: str) -> bool:
+    """用系统默认程序打开链接；失败时返回 False，由调用方给出可复制的地址。"""
+    try:
+        if sys.platform.startswith("win"):
+            os.startfile(url)  # type: ignore[attr-defined]
+            return True
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        return webbrowser.open(url)
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def find_minecraft_dirs(folder: str, depth: int = 2) -> List[str]:
+    """在给定目录的 1~depth 层子目录里找 .minecraft（用于“选了启动器根目录”的场景）。"""
+    folder = os.path.abspath(folder)
+    if not os.path.isdir(folder):
+        return []
+    if os.path.basename(os.path.normpath(folder)).lower() == ".minecraft":
+        return [os.path.normpath(folder)]
+    found: List[str] = []
+
+    def scan(base: str, level: int) -> None:
+        try:
+            names = sorted(os.listdir(base))
+        except OSError:
+            return
+        for name in names:
+            path = os.path.join(base, name)
+            if not os.path.isdir(path):
+                continue
+            if name.lower() == ".minecraft":
+                found.append(os.path.normpath(path))
+            elif level < depth:
+                scan(path, level + 1)
+
+    scan(folder, 1)
+    return found
 
 
 def default_game_dir() -> Tuple[str, Optional[str]]:
@@ -203,7 +264,10 @@ class App:
         self.custom_sources = sources.load_sources()
 
         game_dir, self.dir_warning = default_game_dir()
-        self.settings.setdefault("game_dir", game_dir)
+        self.default_dir = game_dir
+        saved = str(self.settings.get("game_dir") or "")
+        # 只有“上次确实选过且仍然存在”的目录才预填；否则显示“未选择”
+        self.initial_dir = saved if saved and os.path.isdir(saved) else ""
 
         self.root.title(APP_TITLE)
         self._apply_dpi_scale()
@@ -411,15 +475,17 @@ class App:
         line1 = ttk.Frame(box)
         line1.pack(fill="x")
         ttk.Label(line1, text="安装目录").pack(side="left")
-        self.var_dir = tk.StringVar(value=str(self.settings.get("game_dir")))
+        self.var_dir = tk.StringVar(value=self.initial_dir or DIR_PLACEHOLDER)
         self.entry_dir = ttk.Entry(line1, textvariable=self.var_dir)
         self.entry_dir.pack(side="left", fill="x", expand=True, padx=6)
-        self.entry_dir.bind("<FocusOut>", lambda _e: self._on_dir_changed())
+        self.entry_dir.bind("<FocusIn>", self._on_dir_focus_in)
+        self.entry_dir.bind("<FocusOut>", self._on_dir_focus_out)
         ttk.Button(line1, text="浏览…", command=self._browse_dir).pack(side="left")
         ttk.Button(line1, text="打开", command=self._open_dir).pack(side="left", padx=(6, 0))
 
         self.lbl_dir_hint = ttk.Label(
-            box, text="默认是启动器同目录下的 .minecraft；要复用 PCL / HMCL 已下载的文件，改成对应目录即可。",
+            box, text="请选择启动器同目录下的 .minecraft；如果你选的是启动器根目录，"
+                      "会自动在它的子目录里找 .minecraft 并询问是否切换。",
             style="Hint.TLabel", justify="left")
         self.lbl_dir_hint.pack(anchor="w", pady=(4, 8))
         if self.dir_warning:
@@ -526,7 +592,8 @@ class App:
         if not self.busy:
             self.btn_start.configure(text=self._action_text())
         if self.notebook.index(self.notebook.select()) == 2 and not self.var_custom_dest.get():
-            self.var_custom_dest.set(os.path.join(os.path.abspath(self.var_dir.get()), "downloads"))
+            base = self._dir_value() or self.default_dir
+            self.var_custom_dest.set(os.path.join(os.path.abspath(base), "downloads"))
 
     def _update_skip_hint(self) -> None:
         if self.var_skip_assets.get():
@@ -549,8 +616,25 @@ class App:
 
     # ---- 目录 --------------------------------------------------------
 
+    def _dir_value(self) -> str:
+        value = self.var_dir.get().strip()
+        return "" if value in ("", DIR_PLACEHOLDER) else value
+
+    def _on_dir_focus_in(self, _event=None) -> None:
+        if self.var_dir.get().strip() == DIR_PLACEHOLDER:
+            self.var_dir.set("")
+
+    def _on_dir_focus_out(self, _event=None) -> None:
+        if not self.var_dir.get().strip():
+            self.var_dir.set(DIR_PLACEHOLDER)
+            return
+        self._apply_dir_choice()
+
     def _on_dir_changed(self) -> None:
-        path = os.path.abspath(self.var_dir.get().strip())
+        raw = self._dir_value()
+        if not raw:
+            return
+        path = os.path.abspath(raw)
         isolated, reason = detect_isolation(path)
         if isolated is None:
             self._append_log("无法判断该目录的版本隔离状态（%s），保持当前设置。" % reason)
@@ -564,10 +648,44 @@ class App:
             self._append_log("目录特征：%s（版本隔离已与检测结果一致）" % reason)
 
     def _browse_dir(self) -> None:
-        chosen = filedialog.askdirectory(initialdir=self.var_dir.get() or os.getcwd())
+        initial = self._dir_value() or self.default_dir or os.getcwd()
+        chosen = filedialog.askdirectory(initialdir=initial)
         if chosen:
             self.var_dir.set(os.path.normpath(chosen))
+            self._apply_dir_choice()
+
+    def _apply_dir_choice(self) -> None:
+        """选了非 .minecraft 目录时，向下找 .minecraft 并询问是否切换。"""
+        if getattr(self, "_dir_prompting", False):
+            return
+        raw = self._dir_value()
+        if not raw:
+            return
+        path = os.path.abspath(raw)
+        if not os.path.isdir(path):
+            return
+        if os.path.basename(os.path.normpath(path)).lower() == ".minecraft":
             self._on_dir_changed()
+            return
+        if path == getattr(self, "_dir_prompted_for", None):
+            return
+        found = find_minecraft_dirs(path, depth=2)
+        if not found:
+            self._on_dir_changed()
+            return
+        target = found[0]
+        extra = "" if len(found) == 1 else "（共找到 %d 个，先列出第一个）" % len(found)
+        self._dir_prompting = True
+        try:
+            self._dir_prompted_for = path
+            if messagebox.askyesno(
+                    "发现 .minecraft",
+                    "在 %s\n\n找到了 .minecraft 目录%s。\n要切换到这个目录吗？" % (target, extra)):
+                self.var_dir.set(target)
+                self._dir_prompted_for = target
+        finally:
+            self._dir_prompting = False
+        self._on_dir_changed()
 
     def _browse_custom_dest(self) -> None:
         chosen = filedialog.askdirectory(initialdir=self.var_custom_dest.get() or os.getcwd())
@@ -581,10 +699,13 @@ class App:
             self.notebook.select(self.tab_pack)
 
     def _open_dir(self) -> None:
-        path = os.path.abspath(self.var_dir.get())
-        ok, reason = probe_writable(path)
-        if not ok:
-            messagebox.showerror("目录不可写", reason)
+        raw = self._dir_value()
+        if not raw:
+            messagebox.showinfo("未选择目录", "还没有选择安装目录。请先点“浏览…”选择，或直接开始下载。")
+            return
+        path = os.path.abspath(raw)
+        if not os.path.isdir(path):
+            messagebox.showinfo("目录不存在", "该目录还不存在，下载完成后会自动创建：\n%s" % path)
             return
         try:
             os.startfile(path)  # type: ignore[attr-defined]
@@ -632,12 +753,14 @@ class App:
 
     def _load_manifest_async(self) -> None:
         self.lbl_versions.configure(text="正在加载版本列表…")
-        game_dir = os.path.abspath(self.var_dir.get())
+        game_dir = os.path.abspath(self._dir_value() or self.default_dir)
         mirror = self._selected_mirror()
 
         def work():
             try:
-                manifest = vanilla.load_manifest(game_dir, mirror, refresh=True)
+                # 缓存放 %APPDATA%\MCD\cache，避免在用户确认安装目录前就创建 .minecraft
+                manifest = vanilla.load_manifest(game_dir, mirror, refresh=True,
+                                                 cache_dir=config.cache_dir())
                 self.manifest = manifest
                 self._emit(("log", "版本列表已更新：共 %d 个版本" % len(manifest.get("versions", []))))
                 self._emit(("refresh_versions",))
@@ -874,12 +997,45 @@ class App:
             job = {"kind": "version", "game": game, "loader": loader, "loader_version": loader_version,
                    "fabric_api": self._fabric_api_choice(game) if loader == "fabric" else None}
 
+        raw = self._dir_value()
+        if not raw:
+            answer = messagebox.askyesnocancel(
+                "未选择安装目录",
+                "还没有选择安装目录。\n\n是否使用启动器同目录下的：\n%s\n\n"
+                "选“是”用这个目录，“否”手动浏览，“取消”返回。" % self.default_dir)
+            if answer is None:
+                return
+            if answer:
+                raw = self.default_dir
+                self.var_dir.set(raw)
+            else:
+                chosen = filedialog.askdirectory(initialdir=self.default_dir or os.getcwd())
+                if not chosen:
+                    return
+                raw = os.path.normpath(chosen)
+                self.var_dir.set(raw)
+            self._apply_dir_choice()
+            raw = self._dir_value()
+            if not raw:
+                return
+
         self._on_dir_changed()
-        game_dir = os.path.abspath(self.var_dir.get().strip() or default_game_dir()[0])
+        game_dir = os.path.abspath(raw)
         ok, reason = probe_writable(game_dir)
         if not ok:
-            messagebox.showerror("目录不可写", reason)
-            return
+            fallback = os.path.join(os.environ.get("APPDATA") or os.path.expanduser("~"), "MCD", "minecraft")
+            if messagebox.askyesno(
+                    "目录不可写",
+                    "%s\n\n%s\n\n是否改用 %s ？" % (reason, write_error_tip(), fallback)):
+                ok_fallback, reason_fallback = probe_writable(fallback)
+                if not ok_fallback:
+                    messagebox.showerror("依然不可写", reason_fallback)
+                    return
+                game_dir = fallback
+                self.var_dir.set(game_dir)
+                self._append_log("安装目录不可写，已改用 %s" % fallback)
+            else:
+                return
 
         job["isolate"] = bool(self.var_isolate.get())
         options = dict(game_dir=game_dir, mirror=self._selected_mirror(),
@@ -977,7 +1133,8 @@ class App:
         if not url:
             messagebox.showwarning("缺少链接", "请先填写要下载的链接。")
             return
-        dest_dir = self.var_custom_dest.get().strip() or os.path.join(os.path.abspath(self.var_dir.get()), "downloads")
+        dest_dir = self.var_custom_dest.get().strip() or os.path.join(
+            os.path.abspath(self._dir_value() or self.default_dir), "downloads")
         filename = self.var_custom_name.get().strip()
         dest = os.path.join(dest_dir, filename) if filename else dest_dir
         self._set_busy(True)
@@ -1001,7 +1158,8 @@ class App:
         self._set_busy(False)
         if messagebox.askyesno("这是整合包", "下载完成：\n%s\n\n要直接按整合包安装到当前目录吗？" % path):
             self._set_busy(True)
-            options = dict(game_dir=os.path.abspath(self.var_dir.get()), mirror=self._selected_mirror(),
+            options = dict(game_dir=os.path.abspath(self._dir_value() or self.default_dir),
+                           mirror=self._selected_mirror(),
                            threads=max(1, int(self.var_threads.get() or 8)),
                            skip_assets=bool(self.var_skip_assets.get()))
             threading.Thread(target=self._run_job,
@@ -1025,7 +1183,7 @@ class App:
         if result.get("custom"):
             self._append_log("保存位置：%s" % result["custom"])
             return
-        target = result.get("dir") or os.path.abspath(self.var_dir.get())
+        target = result.get("dir") or os.path.abspath(self._dir_value() or self.default_dir)
         lines = [("目录", target)]
         for key in ("version", "loader", "loader_version", "fabric_api", "id", "pack", "files"):
             if result.get(key):
@@ -1064,10 +1222,14 @@ class App:
                 pass
             window.destroy()
 
+        def get_original() -> None:
+            if not open_external(LICENSE_URL):
+                messagebox.showinfo("请手动打开", "没能自动打开浏览器，请手动访问：\n%s" % LICENSE_URL)
+            close()
+
         buttons = ttk.Frame(frame)
         buttons.pack(fill="x")
-        ttk.Button(buttons, text="获取正版",
-                   command=lambda: (webbrowser.open(LICENSE_URL), close())).pack(side="left")
+        ttk.Button(buttons, text="获取正版", command=get_original).pack(side="left")
         ttk.Button(buttons, text="我是正版用户", command=close).pack(side="right")
         window.protocol("WM_DELETE_WINDOW", close)
         window.update_idletasks()
