@@ -83,6 +83,17 @@
 python -m mcd.gui
 ```
 
+## 微软商店（MSIX）
+
+仓库提供 MSIX 打包脚本与上架说明：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\build-msix.ps1 -InputDir <onedir 目录>
+```
+
+产物 `dist/MCD_<版本>_x64.msix` 已通过 `makeappx validate`。提交商店需要 Partner Center 账号、
+实名验证，并把清单里的 Publisher 换成商店分配的身份——详见 [docs/store.md](docs/store.md)。
+
 ## 能下什么
 
 | 类型 | 说明 |
