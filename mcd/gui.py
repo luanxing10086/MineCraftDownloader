@@ -33,6 +33,24 @@ from .rules import Context
 APP_TITLE = "MCD"
 HEADER_TEXT = "Minecraft 下载器"
 DIR_PLACEHOLDER = "未选择"
+_PATH_QUOTES = '"\'“”‘’'
+
+
+def clean_path(text: str) -> str:
+    """清理用户粘贴的路径：去掉首尾空白、各种引号（资源管理器“复制文件地址”会带双引号）、
+    末尾多余的分隔符，并展开 %VAR% 与 ~。"""
+    value = (text or "").strip()
+    for ch in _PATH_QUOTES:
+        value = value.replace(ch, "")
+    value = value.strip()
+    if value.lower().startswith("file:///"):
+        value = value[8:]
+    value = os.path.expandvars(os.path.expanduser(value))
+    if len(value) > 3 and value[-1] in "\\/":
+        value = value.rstrip("\\/")
+    if len(value) == 2 and value[1] == ":":  # 盘根：C: -> C:\
+        value += "\\"
+    return value
 
 AUTO_RELEASE = "最新正式版（自动）"
 AUTO_BETA = "最新测试版（自动）"
@@ -107,8 +125,14 @@ def open_external(url: str) -> bool:
         return False
 
 
+def is_drive_root(path: str) -> bool:
+    """是否为盘根（C:\\、D:\\ 或 UNC 根）。"""
+    _drive, tail = os.path.splitdrive(os.path.abspath(path))
+    return tail in ("\\", "/", "")
+
+
 def find_minecraft_dirs(folder: str, depth: int = 2) -> List[str]:
-    """在给定目录的 1~depth 层子目录里找 .minecraft（用于“选了启动器根目录”的场景）。"""
+    """在给定目录下找 .minecraft：只看它本身与**一级子文件夹**（depth=2 表示 子文件夹/.minecraft）。"""
     folder = os.path.abspath(folder)
     if not os.path.isdir(folder):
         return []
@@ -505,6 +529,7 @@ class App:
         self.var_dir = tk.StringVar(value=self.initial_dir or DIR_PLACEHOLDER)
         self.entry_dir = ttk.Entry(line1, textvariable=self.var_dir)
         self.entry_dir.pack(side="left", fill="x", expand=True, padx=6)
+        self.entry_dir.bind("<Button-1>", self._on_dir_click)
         self.entry_dir.bind("<FocusIn>", self._on_dir_focus_in)
         self.entry_dir.bind("<FocusOut>", self._on_dir_focus_out)
         ttk.Button(line1, text="浏览…", command=self._browse_dir).pack(side="left")
@@ -512,7 +537,7 @@ class App:
 
         self.lbl_dir_hint = ttk.Label(
             box, text="请选择启动器同目录下的 .minecraft；如果你选的是启动器根目录，"
-                      "会自动在它的子目录里找 .minecraft 并询问是否切换。",
+                      "会在它的一级子目录里找 .minecraft 并询问是否切换。",
             style="Hint.TLabel", justify="left")
         self.lbl_dir_hint.pack(anchor="w", pady=(4, 8))
         if self.dir_warning:
@@ -695,13 +720,18 @@ class App:
 
     def _dir_value(self) -> str:
         value = self.var_dir.get().strip()
-        return "" if value in ("", DIR_PLACEHOLDER) else value
+        if value in ("", DIR_PLACEHOLDER):
+            return ""
+        return clean_path(value)
 
-    def _on_dir_focus_in(self, _event=None) -> None:
-        """未选择目录时，点一下输入框等同于点“浏览…”。"""
+    def _on_dir_click(self, _event=None) -> None:
+        """未选择时点击输入框 = 点“浏览…”（等焦点落定再弹，避免抢占）。"""
         if self.var_dir.get().strip() != DIR_PLACEHOLDER:
             return
-        if getattr(self, "_dir_browsing", False):
+        self.root.after(10, self._browse_when_empty)
+
+    def _browse_when_empty(self) -> None:
+        if self.var_dir.get().strip() != DIR_PLACEHOLDER or getattr(self, "_dir_browsing", False):
             return
         self._dir_browsing = True
         try:
@@ -712,14 +742,59 @@ class App:
         if chosen:
             self.var_dir.set(os.path.normpath(chosen))
             self._apply_dir_choice()
-        elif not self.var_dir.get().strip():
-            self.var_dir.set(DIR_PLACEHOLDER)
+        else:
+            # 取消后留空，方便直接粘贴/输入路径
+            self.var_dir.set("")
+
+    def _on_dir_focus_in(self, _event=None) -> None:
+        value = self.var_dir.get().strip()
+        if value in ("", DIR_PLACEHOLDER):
+            return
+        try:
+            self.entry_dir.select_range(0, "end")
+            self.entry_dir.icursor("end")
+        except tk.TclError:
+            pass
 
     def _on_dir_focus_out(self, _event=None) -> None:
-        if not self.var_dir.get().strip():
+        raw = self.var_dir.get().strip()
+        if not raw:
             self.var_dir.set(DIR_PLACEHOLDER)
             return
+        cleaned = clean_path(raw)
+        if cleaned != raw:
+            self.var_dir.set(cleaned)
+        if cleaned == DIR_PLACEHOLDER:
+            return
+        if not self._dir_sanity_ok(cleaned):
+            return
         self._apply_dir_choice()
+
+    def _dir_sanity_ok(self, path: str) -> bool:
+        """目录不存在 / 盘根目录 时给出提示；同一个路径只提示一次。"""
+        warned = getattr(self, "_dir_warned", None)
+        if warned is None:
+            warned = self._dir_warned = set()
+        if not os.path.isdir(path):
+            key = ("missing", path)
+            if key not in warned:
+                warned.add(key)
+                messagebox.showwarning(
+                    "目录不存在",
+                    "这个目录不存在：\n%s\n\n开始下载时会自动创建。\n如果不是你想要的位置，请重新选择。" % path)
+            return False
+        if is_drive_root(path):
+            key = ("root", path)
+            if key not in warned:
+                warned.add(key)
+                if not messagebox.askyesno(
+                        "选择的是盘根目录",
+                        "你选的是盘根目录：\n%s\n\n直接把游戏文件放在盘根目录通常不合适，"
+                        "建议选一个 .minecraft 文件夹。\n仍要使用这个目录吗？" % path):
+                    self.var_dir.set(getattr(self, "_last_dir", "") or DIR_PLACEHOLDER)
+                    self._on_dir_changed()
+                    return False
+        return True
 
     def _on_dir_changed(self) -> None:
         raw = self._dir_value()
@@ -753,7 +828,7 @@ class App:
         if not raw:
             return
         path = os.path.abspath(raw)
-        if not os.path.isdir(path):
+        if not self._dir_sanity_ok(path):
             return
         if os.path.basename(os.path.normpath(path)).lower() == ".minecraft":
             self._last_dir = path
