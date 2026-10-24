@@ -9,6 +9,10 @@
 |---|---|
 | `packaging/AppxManifest.template.xml` | 清单模板（Identity / 图标 / full-trust 应用） |
 | `scripts/build-msix.ps1` | 渲染清单、生成图标、调用 `makeappx` 打包与校验 |
+| `packaging/store/description-zh.md` / `description-en.md` | 商店文案（短描述、长描述、声明） |
+| `packaging/store/privacy.md` | 隐私声明（中英） |
+| `packaging/store/screenshot-version.png` / `screenshot-modpack.png` | 1920×1080 截图 |
+| `packaging/store/CHECKLIST.md` | 你需要做的步骤清单 |
 
 本地构建（使用 onedir 产物）：
 
