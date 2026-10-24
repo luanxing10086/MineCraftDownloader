@@ -21,6 +21,49 @@ class DownloadError(RuntimeError):
     """下载失败（网络、校验或磁盘）。"""
 
 
+class DownloadCancelled(DownloadError):
+    """用户主动取消。"""
+
+
+_CANCEL = threading.Event()
+_CREATED: "set[str]" = set()
+_CREATED_LOCK = threading.Lock()
+
+
+def reset_created() -> None:
+    """开始一次新任务前清空“本次新建文件”的记录。"""
+    with _CREATED_LOCK:
+        _CREATED.clear()
+
+
+def created_files() -> List[str]:
+    """本次任务新建的文件（取消时用于清理，不影响此前已存在的文件）。"""
+    with _CREATED_LOCK:
+        return sorted(_CREATED)
+
+
+def _remember_created(path: str) -> None:
+    with _CREATED_LOCK:
+        _CREATED.add(path)
+
+
+def reset_cancel() -> None:
+    _CANCEL.clear()
+
+
+def request_cancel() -> None:
+    _CANCEL.set()
+
+
+def is_cancelled() -> bool:
+    return _CANCEL.is_set()
+
+
+def raise_if_cancelled() -> None:
+    if _CANCEL.is_set():
+        raise DownloadCancelled("已取消")
+
+
 # ---------------------------------------------------------------- 基础工具
 
 
@@ -152,8 +195,12 @@ def download(
     """把 urls 中最先可用的资源下载到 dest，返回字节数；已存在且校验通过则返回 0。"""
     dest = os.path.abspath(dest)
     label = label or os.path.basename(dest)
+    raise_if_cancelled()
+    existed_before = os.path.exists(dest)
     if reporter and not counted:
         reporter.start(1)
+        if size and hasattr(reporter, "expect"):
+            reporter.expect(int(size))
     if os.path.exists(dest):
         if sha1:
             if file_sha1(dest) == sha1:
@@ -177,6 +224,8 @@ def download(
                     total = int(response.headers.get("Content-Length") or size or 0)
                     got = 0
                     while True:
+                        if _CANCEL.is_set():
+                            raise DownloadCancelled("已取消")
                         chunk = response.read(CHUNK)
                         if not chunk:
                             break
@@ -187,9 +236,17 @@ def download(
                 if sha1 and file_sha1(part) != sha1:
                     raise DownloadError("sha1 校验失败")
                 os.replace(part, dest)
+                if not existed_before:
+                    _remember_created(dest)
                 if reporter:
                     reporter.done(label, got)
                 return got
+            except DownloadCancelled:
+                try:
+                    os.remove(part)
+                except OSError:
+                    pass
+                raise
             except Exception as exc:  # noqa: BLE001 - 换下一个候选/重试
                 errors.append("%s -> %s" % (url, exc))
                 try:
@@ -215,6 +272,7 @@ def download_many(
     failures: List[str] = []
 
     def worker(task: Dict) -> Optional[str]:
+        raise_if_cancelled()
         try:
             download(
                 task["dest"],
@@ -227,6 +285,8 @@ def download_many(
                 counted=True,
             )
             return None
+        except DownloadCancelled:
+            raise
         except Exception as exc:  # noqa: BLE001 - 汇总后统一报告
             return "%s: %s" % (task.get("label") or task["dest"], exc)
 

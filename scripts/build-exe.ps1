@@ -1,10 +1,10 @@
-﻿<#
+﻿﻿<#
 .SYNOPSIS
     构建 MCD 的可执行文件（PyInstaller）。默认构建命令行版，加 -Gui 构建图形界面版。
 
 .DESCRIPTION
     pip 在受限网络里可能卡住，所以依赖改为“直接抓 wheel 再解包”的方式获取；
-    若本机有可用的代码签名证书（CurrentUser\My 中 subject 含 mcdonloader），会给产物签名。
+    若本机有可用的代码签名证书（CurrentUser\My 中 subject 含 Cantabile），会给产物签名。
 
 .EXAMPLE
     powershell -ExecutionPolicy Bypass -File scripts\build-exe.ps1
@@ -63,7 +63,7 @@ Copy-Item $exe $outExe -Force
 Write-Host "==> 产物：$outExe（$([math]::Round((Get-Item $outExe).Length / 1MB, 1)) MB）" -ForegroundColor Green
 
 $cert = Get-ChildItem Cert:\CurrentUser\My -CodeSigningCert -ErrorAction SilentlyContinue |
-    Where-Object { $_.Subject -like '*mcdonloader*' } | Select-Object -First 1
+    Where-Object { $_.Subject -like '*Cantabile*' } | Select-Object -First 1
 if ($cert) {
     try {
         Write-Host "==> 使用证书 $($cert.Thumbprint) 签名" -ForegroundColor Cyan

@@ -330,6 +330,15 @@ def install(
 
     stats = {"version": version_id, "files": 0, "bytes": 0, "skipped": 0, "assets": None}
 
+    # 先把这一版的已知体积登记给进度条（库 + 资源），再开始下载，
+    # 这样总进度不会因为阶段切换而先满后退。
+    libraries = collect_libraries(version, game_dir, context)
+    if reporter is not None and hasattr(reporter, "expect"):
+        estimate = sum(int(item.get("size") or 0) for item in libraries)
+        if not skip_assets:
+            estimate += int((version.get("assetIndex") or {}).get("totalSize") or 0)
+        reporter.expect(estimate)
+
     # 客户端主 jar
     if not skip_client:
         client = (version.get("downloads") or {}).get("client")
@@ -345,7 +354,6 @@ def install(
             )
 
     # 依赖库 + 原生库
-    libraries = collect_libraries(version, game_dir, context)
     failures = download_many(libraries, proxy=proxy, threads=threads, reporter=reporter)
     if failures:
         raise InstallError("依赖库下载失败：\n  " + "\n  ".join(failures[:5]))

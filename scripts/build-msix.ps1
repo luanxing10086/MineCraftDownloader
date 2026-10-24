@@ -1,4 +1,4 @@
-﻿<#
+﻿﻿<#
 .SYNOPSIS
     把 onedir 构建打包成 MSIX（用于微软商店提交或本地侧载测试）。
 
@@ -20,7 +20,7 @@ param(
     [Parameter(Mandatory = $true)][string]$InputDir,
     [string]$OutputDir = 'F:\DSH-WORK\dist',
     [string]$IdentityName = 'MCD.MinecraftDownloader',
-    [string]$Publisher = 'CN=mcdonloader self-signed, O=mcdonloader',
+    [string]$Publisher = 'CN=Cantabile',
     [string]$PublisherDisplayName = 'MCD',
     [string]$Version = '0.1.0.0',
     [string]$Description = 'Minecraft 下载器：原版、加载器版本、整合包',
@@ -104,7 +104,7 @@ Write-Host "==> 校验清单" -ForegroundColor Cyan
 
 if ($Sign) {
     $cert = Get-ChildItem Cert:\CurrentUser\My -CodeSigningCert -ErrorAction SilentlyContinue |
-        Where-Object { $_.Subject -like '*mcdonloader*' } | Select-Object -First 1
+        Where-Object { $_.Subject -like '*Cantabile*' } | Select-Object -First 1
     if (-not $cert) { throw '未找到本机自签名证书，无法签名' }
     Write-Host "==> 用本机证书签名（仅侧载测试，商店提交不需要）" -ForegroundColor Cyan
     & $SignTool sign /fd SHA256 /sha1 $cert.Thumbprint $msix | Select-Object -Last 3

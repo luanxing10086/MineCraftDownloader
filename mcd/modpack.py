@@ -211,6 +211,9 @@ def install(
 
     files = [item for item in index.get("files", []) if (item.get("env") or {}).get("client") != "unsupported"]
     total_size = sum(int(item.get("fileSize") or 0) for item in files)
+    if reporter is not None and hasattr(reporter, "expect"):
+        # 先把整合包文件体积计入总进度，避免原版装完时进度条已经满格
+        reporter.expect(total_size)
 
     if dry_run:
         return {

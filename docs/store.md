@@ -43,7 +43,7 @@ powershell -ExecutionPolicy Bypass -File scripts\build-msix.ps1 `
        -Version 0.1.0.0
    ```
 
-   > 现在的默认 Publisher 是本机自签名（`CN=mcdonloader self-signed`），只适用于侧载测试，
+   > 现在的默认 Publisher 是本机自签名（`CN=Cantabile`），只适用于侧载测试，
    > 商店会因为这个 Identity 与预留信息不匹配而拒收。
 
 4. **上传包并填写商店信息**

@@ -26,7 +26,8 @@ from tkinter.scrolledtext import ScrolledText
 from . import __version__, config, modpack, mods, sources, vanilla
 from . import loaders as loader_mod
 from .mirror import BMCLAPI, OFFICIAL, Mirror
-from .net import DownloadError, fetch_json, human_size
+from .net import (DownloadCancelled, DownloadError, created_files, fetch_json, human_size,
+                  request_cancel, reset_cancel, reset_created)
 from .rules import Context
 
 APP_TITLE = "MCD"
@@ -203,27 +204,52 @@ class GuiReporter:
         self.done_files = 0
         self.total_bytes = 0
         self.skipped_files = 0
+        self.expected_bytes = 0
+        self.done_bytes = 0
+
+    def expect(self, size: int) -> None:
+        """登记接下来要下载的字节数，作为总进度的分母。"""
+        if size and size > 0:
+            self.expected_bytes += int(size)
+            self._emit(("total", self._overall()))
+
+    def _overall(self) -> float:
+        # 已知工作量太少时先不推进，否则“1 个文件下完”就会显示 100%
+        if self.total_files < 5 and self.expected_bytes < 8 * 1024 * 1024:
+            return 0.0
+        if self.expected_bytes:
+            value = max(0.0, min(self.done_bytes / self.expected_bytes, 1.0))
+        elif self.total_files:
+            value = max(0.0, min(self.done_files / self.total_files, 1.0))
+        else:
+            value = 0.0
+        # 分母可能随后续阶段增大，这里保持单调，避免进度条倒退
+        self._last_overall = max(getattr(self, "_last_overall", 0.0), value)
+        return self._last_overall
 
     def start(self, total_files: int) -> None:
         self.total_files += total_files
-        self._emit(("progress", 0.0, "准备中"))
+        self._emit(("file", 0.0, "准备中"))
+        self._emit(("total", self._overall()))
 
     def progress(self, label: str, got: int, total: int) -> None:
         ratio = (got / total) if total else None
-        if ratio is None:
-            self._emit(("status", "%s  %s" % (label, human_size(got))))
-        else:
-            self._emit(("progress", min(ratio, 1.0), "%s  %s / %s" % (label, human_size(got), human_size(total))))
+        self._emit(("file", ratio, "%s  %s" % (label, human_size(got))))
+        self._emit(("total", self._overall()))
 
     def done(self, label: str, size: int) -> None:
         self.done_files += 1
+        self.done_bytes += int(size or 0)
         self.total_bytes += size
         self._emit(("log", "[%d/%d] %s  (%s)" % (self.done_files, max(self.total_files, self.done_files),
                                                  label, human_size(size))))
+        self._emit(("total", self._overall()))
 
     def skipped(self, size: int) -> None:
         self.done_files += 1
+        self.done_bytes += int(size or 0)
         self.skipped_files += 1
+        self._emit(("total", self._overall()))
 
     def flush(self) -> None:
         pass
@@ -290,7 +316,8 @@ class App:
             self.scale = max(1.0, self.root.winfo_fpixels("1i") / 96.0)
         except tk.TclError:
             self.scale = 1.0
-        self.root.geometry("%dx%d" % (int(1060 * self.scale), int(830 * self.scale)))
+        self.root.geometry("%dx%d" % (int(1080 * self.scale), int(920 * self.scale)))
+        self.root.minsize(int(960 * self.scale), int(780 * self.scale))
 
     def _init_style(self) -> None:
         style = ttk.Style()
@@ -526,14 +553,27 @@ class App:
         self._on_isolate_toggled(silent=True)
 
     def _build_log(self, parent: ttk.Frame) -> None:
-        bottom = ttk.Frame(parent)
-        bottom.pack(side="bottom", fill="x", pady=(8, 0))
-        self.progress = ttk.Progressbar(bottom, mode="determinate", maximum=100)
-        self.progress.pack(side="left", fill="x", expand=True)
-        self.lbl_status = ttk.Label(bottom, text="就绪", width=40, anchor="w")
-        self.lbl_status.pack(side="left", padx=10)
-        self.btn_start = ttk.Button(bottom, text="开始下载", style="Accent.TButton", command=self._start)
+        controls = ttk.Frame(parent)
+        controls.pack(side="bottom", fill="x", pady=(8, 0))
+        self.lbl_status = ttk.Label(controls, text="就绪", anchor="w")
+        self.lbl_status.pack(side="left")
+        self.btn_start = ttk.Button(controls, text="开始下载", style="Accent.TButton", command=self._start)
         self.btn_start.pack(side="right")
+        # 取消按钮：初始隐藏，下载开始后再显示在“开始下载”左边
+        self.btn_cancel = ttk.Button(controls, text="取消", command=self._cancel)
+
+        bars = ttk.Frame(parent)
+        bars.pack(side="bottom", fill="x", pady=(6, 0))
+        row_file = ttk.Frame(bars)
+        row_file.pack(fill="x")
+        ttk.Label(row_file, text="当前文件", width=9, anchor="w").pack(side="left")
+        self.progress_file = ttk.Progressbar(row_file, mode="determinate", maximum=100)
+        self.progress_file.pack(side="left", fill="x", expand=True)
+        row_total = ttk.Frame(bars)
+        row_total.pack(fill="x", pady=(3, 0))
+        ttk.Label(row_total, text="总进度", width=9, anchor="w").pack(side="left")
+        self.progress_total = ttk.Progressbar(row_total, mode="determinate", maximum=100)
+        self.progress_total.pack(side="left", fill="x", expand=True)
 
         box = ttk.LabelFrame(parent, text="日志", padding=6)
         box.pack(fill="both", expand=True, pady=(8, 0))
@@ -551,10 +591,13 @@ class App:
                 kind, *rest = self.queue.get_nowait()
                 if kind == "log":
                     self._append_log(rest[0])
-                elif kind == "progress":
+                elif kind == "file":
                     ratio, label = rest
-                    self.progress["value"] = ratio * 100
-                    self.lbl_status.configure(text=label[-60:])
+                    self.progress_file["value"] = (ratio or 0.0) * 100
+                    if label:
+                        self.lbl_status.configure(text=str(label)[-70:])
+                elif kind == "total":
+                    self.progress_total["value"] = float(rest[0]) * 100
                 elif kind == "status":
                     self.lbl_status.configure(text=str(rest[0])[-60:])
                 elif kind == "state":
@@ -579,10 +622,44 @@ class App:
         self.log.see("end")
         self.log.configure(state="disabled")
 
+    def _reset_progress(self) -> None:
+        self.progress_file["value"] = 0
+        self.progress_total["value"] = 0
+
+    def _complete_progress(self) -> None:
+        self.progress_file["value"] = 100
+        self.progress_total["value"] = 100
+
     def _set_busy(self, busy: bool) -> None:
         self.busy = busy
         self.btn_start.configure(state="disabled" if busy else "normal",
                                  text="下载中…" if busy else self._action_text())
+        if busy:
+            self.btn_cancel.configure(state="normal", text="取消")
+            self.btn_cancel.pack(side="right", padx=(0, 6))
+        else:
+            self.btn_cancel.pack_forget()
+
+    def _cancel(self) -> None:
+        if not self.busy:
+            return
+        self.btn_cancel.configure(state="disabled", text="正在取消…")
+        self._append_log("已请求取消，等待当前文件结束…")
+        request_cancel()
+
+    def _cleanup_created(self) -> None:
+        """取消后删掉本次下载新建的文件；此前已存在的文件一律不动。"""
+        paths = created_files()
+        removed = 0
+        for path in paths:
+            try:
+                os.remove(path)
+                removed += 1
+            except OSError:
+                continue
+        reset_created()
+        if paths:
+            self._append_log("已清理本次新建的 %d 个文件（此前的文件未动）" % removed)
 
     def _action_text(self) -> str:
         index = self.notebook.index(self.notebook.select())
@@ -621,8 +698,22 @@ class App:
         return "" if value in ("", DIR_PLACEHOLDER) else value
 
     def _on_dir_focus_in(self, _event=None) -> None:
-        if self.var_dir.get().strip() == DIR_PLACEHOLDER:
-            self.var_dir.set("")
+        """未选择目录时，点一下输入框等同于点“浏览…”。"""
+        if self.var_dir.get().strip() != DIR_PLACEHOLDER:
+            return
+        if getattr(self, "_dir_browsing", False):
+            return
+        self._dir_browsing = True
+        try:
+            chosen = filedialog.askdirectory(initialdir=self.default_dir or os.getcwd(),
+                                             title="选择安装目录")
+        finally:
+            self._dir_browsing = False
+        if chosen:
+            self.var_dir.set(os.path.normpath(chosen))
+            self._apply_dir_choice()
+        elif not self.var_dir.get().strip():
+            self.var_dir.set(DIR_PLACEHOLDER)
 
     def _on_dir_focus_out(self, _event=None) -> None:
         if not self.var_dir.get().strip():
@@ -665,12 +756,26 @@ class App:
         if not os.path.isdir(path):
             return
         if os.path.basename(os.path.normpath(path)).lower() == ".minecraft":
+            self._last_dir = path
             self._on_dir_changed()
             return
         if path == getattr(self, "_dir_prompted_for", None):
             return
         found = find_minecraft_dirs(path, depth=2)
         if not found:
+            # 既不是 .minecraft，子目录里也没有：让用户确认是否仍然下载到这里
+            self._dir_prompting = True
+            try:
+                self._dir_prompted_for = path
+                keep = messagebox.askyesno(
+                    "未找到 .minecraft 文件夹",
+                    "在 %s\n\n没有找到 .minecraft 文件夹。\n\n是否仍然下载到这个文件夹内？" % path)
+            finally:
+                self._dir_prompting = False
+            if keep:
+                self._last_dir = path
+            else:
+                self.var_dir.set(getattr(self, "_last_dir", "") or DIR_PLACEHOLDER)
             self._on_dir_changed()
             return
         target = found[0]
@@ -909,9 +1014,10 @@ class App:
             self.lbl_loader_hint.configure(text="没有查到可用版本，将按“%s”自动选择。" % AUTO_LATEST)
             return
 
-        autos = [AUTO_RELEASE, AUTO_BETA] if has_stability else [AUTO_LATEST]
+        autos = [AUTO_BETA, AUTO_RELEASE] if has_stability else [AUTO_LATEST]
         self.combo_loader_version.configure(values=autos + versions, state="readonly")
-        self.var_loader_version.set(autos[0])
+        # 顺序上测试版在上，但默认仍选正式版，避免新用户默认装到测试版
+        self.var_loader_version.set(AUTO_RELEASE if has_stability else AUTO_LATEST)
         if has_stability:
             stable = [version for version, is_stable in items if is_stable]
             unstable = [version for version, is_stable in items if not is_stable]
@@ -925,7 +1031,7 @@ class App:
                      % (len(items), "，".join(parts) or "无"))
         else:
             self.lbl_loader_hint.configure(
-                text="共 %d 个版本；该来源无法区分正式/测试版，只提供“最新”。" % len(items))
+                text="共 %d 个版本；该来源无法区分正式/测试版。" % len(items))
 
     def _resolve_loader_version(self, key: str, game: str, choice: str) -> Optional[str]:
         if choice.endswith(UNIQUE_SUFFIX):
@@ -1042,8 +1148,10 @@ class App:
                        threads=max(1, int(self.var_threads.get() or 8)),
                        skip_assets=bool(self.var_skip_assets.get()))
         self._remember_settings(game_dir, options)
+        reset_cancel()
+        reset_created()
         self._set_busy(True)
-        self.progress["value"] = 0
+        self._reset_progress()
         self._append_log("=" * 60)
         self._append_log("目标目录：%s" % game_dir)
         self._append_log("下载源：%s" % options["mirror"].label)
@@ -1137,8 +1245,10 @@ class App:
             os.path.abspath(self._dir_value() or self.default_dir), "downloads")
         filename = self.var_custom_name.get().strip()
         dest = os.path.join(dest_dir, filename) if filename else dest_dir
+        reset_cancel()
+        reset_created()
         self._set_busy(True)
-        self.progress["value"] = 0
+        self._reset_progress()
         threading.Thread(target=self._run_custom, args=(url, dest), daemon=True).start()
 
     def _run_custom(self, url: str, dest: str) -> None:
@@ -1166,19 +1276,25 @@ class App:
                              args=({"kind": "pack", "source": path, "isolate": bool(self.var_isolate.get())},
                                    options), daemon=True).start()
         else:
-            self.progress["value"] = 0
+            self._reset_progress()
             self.lbl_status.configure(text="完成")
 
     # ---- 结束 --------------------------------------------------------
 
     def _on_finished(self, result: Dict) -> None:
         self._set_busy(False)
+        reset_cancel()
         if result.get("error"):
-            self.progress["value"] = 0
+            self._reset_progress()
+            if "取消" in str(result["error"]):
+                self.lbl_status.configure(text="已取消")
+                self._cleanup_created()
+                self._append_log("已取消。")
+                return
             self.lbl_status.configure(text="失败")
             messagebox.showerror("下载失败", result["error"])
             return
-        self.progress["value"] = 100
+        self._complete_progress()
         self.lbl_status.configure(text="完成")
         if result.get("custom"):
             self._append_log("保存位置：%s" % result["custom"])
