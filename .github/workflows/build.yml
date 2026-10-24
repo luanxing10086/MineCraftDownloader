@@ -47,6 +47,7 @@ jobs:
         run: >
           pyinstaller ${{ matrix.mode }} --noconfirm
           --name ${{ matrix.name }}
+          --icon packaging/icon.ico
           --paths .
           --distpath dist
           --workpath build/${{ matrix.name }}

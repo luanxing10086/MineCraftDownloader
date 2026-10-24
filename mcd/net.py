@@ -12,7 +12,7 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, Iterable, List, Optional, Sequence
 
-USER_AGENT = "MCD/0.1 (Minecraft downloader; +https://github.com/luanxing10086/MineCraftDownloader)"
+USER_AGENT = "MCD/0.1 (Minecraft downloader)"
 CHUNK = 256 * 1024
 TIMEOUT = 30
 
@@ -216,6 +216,8 @@ def download(
         os.makedirs(directory, exist_ok=True)
 
     errors: List[str] = []
+    rate_limited = False
+    next_wait = 0
     for attempt in range(1, retries + 1):
         for url in urls:
             part = dest + ".part"
@@ -249,14 +251,40 @@ def download(
                 raise
             except Exception as exc:  # noqa: BLE001 - 换下一个候选/重试
                 errors.append("%s -> %s" % (url, exc))
+                status = getattr(exc, "code", None)
+                if status in (403, 429):
+                    retry_after = None
+                    try:
+                        retry_after = exc.headers.get("Retry-After")  # type: ignore[union-attr]
+                    except Exception:  # noqa: BLE001
+                        retry_after = None
+                    rate_limited = True
+                    if retry_after and str(retry_after).isdigit():
+                        next_wait = max(next_wait, min(int(retry_after), 60))
                 try:
                     os.remove(part)
                 except OSError:
                     pass
         if attempt < retries:
-            time.sleep(min(2 ** (attempt - 1), 4))
+            # 限流时退避得久一点：5s → 15s → 30s；普通错误 1/2/4s
+            default_wait = [5, 15, 30][min(attempt - 1, 2)] if rate_limited else min(2 ** (attempt - 1), 4)
+            time.sleep(max(default_wait, next_wait))
+            next_wait = 0
 
-    raise DownloadError("下载失败：%s\n  %s" % (dest, "\n  ".join(errors[-4:])))
+    raise DownloadError(_describe_failure(dest, errors))
+
+
+def _describe_failure(dest: str, errors: Sequence[str]) -> str:
+    """把失败原因翻译成人能看懂的一句话提示。"""
+    joined = " ".join(errors)
+    text = "下载失败：%s\n  %s" % (dest, "\n  ".join(list(errors)[-4:]))
+    if "429" in joined or "403" in joined:
+        text += "\n提示：镜像限流（HTTP 429/403）。等几秒再试，或换下载源/换时段。"
+    if "timed out" in joined.lower() or "URLError" in joined or "ConnectionReset" in joined:
+        text += "\n提示：连接超时或被重置，可能需要代理（--proxy 或系统代理）。"
+    if all("404" in item for item in list(errors)[-2:]):
+        text += "\n提示：返回 404，这个版本可能没有对应的产物文件。"
+    return text
 
 
 def download_many(

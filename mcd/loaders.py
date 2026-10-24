@@ -20,7 +20,8 @@ from typing import Dict, List, Optional, Set
 
 from . import java, vanilla
 from .mirror import BMCLAPI_BASE, Mirror
-from .net import DownloadError, Reporter, download, download_many, fetch_bytes, fetch_json
+from .net import (DownloadError, Reporter, download, download_many, fetch_bytes, fetch_json,
+                  open_url)
 from .rules import Context
 
 FABRIC_META = "https://meta.fabricmc.net/v2"
@@ -391,6 +392,9 @@ def _version_key(text: str):
 
 
 def _neoforge_prefix(game: str) -> str:
+    # 特例：1.20.1 的 NeoForge 沿用 Forge 47.x 版本号（47.1.x）
+    if game == "1.20.1":
+        return "47.1."
     pieces = game.split(".")
     if pieces[0] == "1" and len(pieces) >= 3:
         # 旧体系：1.21.1 -> 21.1.x
@@ -453,6 +457,16 @@ def resolve_neoforge_version(
     return (stable or versions)[-1]
 
 
+def _neoforge_installer_urls(version: str, mirror: Mirror) -> List[str]:
+    urls: List[str] = []
+    if mirror.is_mirror:
+        urls.append("%s/maven/%s/%s/neoforge-%s-installer.jar"
+                    % (BMCLAPI_BASE, NEOFORGE_GROUP, version, version))
+    urls.append("%s/%s/%s/neoforge-%s-installer.jar"
+                % (NEOFORGE_MAVEN, NEOFORGE_GROUP, version, version))
+    return urls
+
+
 def install_neoforge(
     game: str,
     loader_version: Optional[str] = None,
@@ -466,25 +480,49 @@ def install_neoforge(
 ) -> Dict:
     mirror = mirror or Mirror()
     version_json = _ensure_vanilla(game, game_dir, mirror, proxy, threads, reporter, skip_assets)
-    neoforge_version = loader_version or resolve_neoforge_version(game, mirror, proxy)
 
-    if mirror.is_mirror:
-        base = BMCLAPI_BASE + "/maven"
+    if loader_version:
+        candidates = [loader_version]
     else:
-        base = NEOFORGE_MAVEN
-    url = "%s/%s/%s/neoforge-%s-installer.jar" % (base, NEOFORGE_GROUP, neoforge_version, neoforge_version)
-    jar_path = os.path.join(game_dir, ".mcd", "installers", "neoforge-%s-installer.jar" % neoforge_version)
-    try:
-        download(jar_path, mirror.urls(url), proxy=proxy, reporter=reporter,
-                 label="installers/neoforge-%s-installer.jar" % neoforge_version)
-    except DownloadError as exc:
-        raise InstallError(
-            "NeoForge installer 下载失败。若直连 maven.neoforged.net 不通，请加 --mirror bmclapi。\n%s" % exc
-        )
+        versions = list_neoforge_versions(game, mirror, proxy)
+        if not versions:
+            raise InstallError("NeoForge 没有对应 %s 的版本" % game)
+        stable = [item for item in versions if _version_key(item) is not None]
+        # 直接下最新版；只有 404（该版本没有 installer）才回退到旧版本。
+        # 不做批量探测——镜像对密集请求会返回 429。
+        candidates = list(reversed(stable or versions))[:3]
+
+    neoforge_version = None
+    last_error = None
+    jar_path = ""
+    for candidate in candidates:
+        base = BMCLAPI_BASE + "/maven" if mirror.is_mirror else NEOFORGE_MAVEN
+        url = "%s/%s/%s/neoforge-%s-installer.jar" % (base, NEOFORGE_GROUP, candidate, candidate)
+        jar_path = os.path.join(game_dir, ".mcd", "installers", "neoforge-%s-installer.jar" % candidate)
+        try:
+            download(jar_path, mirror.urls(url), proxy=proxy, reporter=reporter,
+                     label="installers/neoforge-%s-installer.jar" % candidate)
+            neoforge_version = candidate
+            break
+        except DownloadError as exc:
+            last_error = exc
+            if "404" in str(exc):
+                print("    %s 没有 installer，回退到旧版本" % candidate)
+                continue
+            raise InstallError(
+                "NeoForge installer 下载失败。\n"
+                "若直连 maven.neoforged.net 不通，请加 --mirror bmclapi；"
+                "若提示 429/403，是镜像限流，等半分钟再试。\n%s" % exc
+            )
+    if not neoforge_version:
+        raise InstallError("NeoForge 的 installer 都没能下载：\n%s" % last_error)
     if mirror.is_mirror:
-        prefetched = prefetch_installer_libraries(jar_path, game_dir, mirror, proxy, threads, reporter)
+        # 镜像限流较严，预取阶段降低并发
+        prefetched = prefetch_installer_libraries(
+            jar_path, game_dir, mirror, proxy, max(1, min(threads, 2)), reporter)
         if prefetched:
-            print("    预取 installer 依赖：%d 个文件（避免 installer 直连官方 maven）" % prefetched)
+            print("    预取 installer 依赖：%d 个文件（并发已降到 %d 以避免限流）"
+                  % (prefetched, max(1, min(threads, 2))))
 
     required = (version_json.get("javaVersion") or {}).get("majorVersion")
     chosen_java = java.pick(required, java_path)

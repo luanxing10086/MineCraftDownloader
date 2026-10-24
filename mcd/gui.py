@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 import queue
+import re
 import sys
 import threading
 import traceback
@@ -23,7 +24,7 @@ from tkinter import font as tkfont
 from tkinter import ttk
 from tkinter.scrolledtext import ScrolledText
 
-from . import __version__, config, modpack, mods, sources, vanilla
+from . import __version__, config, icon, modpack, mods, sources, vanilla
 from . import loaders as loader_mod
 from .mirror import BMCLAPI, OFFICIAL, Mirror
 from .net import (DownloadCancelled, DownloadError, created_files, fetch_json, human_size,
@@ -320,6 +321,7 @@ class App:
         self.initial_dir = saved if saved and os.path.isdir(saved) else ""
 
         self.root.title(APP_TITLE)
+        icon.window_icon(self.root)
         self._apply_dpi_scale()
         self.root.minsize(int(940 * self.scale), int(720 * self.scale))
         self._init_style()
@@ -451,6 +453,14 @@ class App:
         self.combo_fabric_api = ttk.Combobox(self.fabric_frame, textvariable=self.var_fabric_api_version,
                                              width=22, state="disabled", values=["最新"])
         self.combo_fabric_api.pack(side="left", padx=6)
+
+        name_row = ttk.Frame(loader)
+        name_row.pack(fill="x", pady=(6, 0))
+        ttk.Label(name_row, text="版本名称").pack(side="left")
+        self.var_version_name = tk.StringVar(value="")
+        ttk.Entry(name_row, textvariable=self.var_version_name, width=32).pack(side="left", padx=6)
+        ttk.Label(name_row, text="留空则自动命名（如 1.20.1、fabric-loader-…）；可自定义，装完会把目录/版本文件一起改名",
+                  style="Hint.TLabel").pack(side="left")
 
         self.lbl_loader_hint = ttk.Label(
             loader, text="选择加载器后会联网列出可用版本；Forge / NeoForge 需要本机有 Java 17 或 21。",
@@ -685,6 +695,22 @@ class App:
         reset_created()
         if paths:
             self._append_log("已清理本次新建的 %d 个文件（此前的文件未动）" % removed)
+
+    def _offer_cleanup_after_failure(self) -> None:
+        """失败后询问是否清理本次新建的文件：默认保留，重试可直接跳过已完成文件。"""
+        paths = created_files()
+        if not paths:
+            return
+        self._append_log("本次新建了 %d 个文件；重试时会自动跳过已校验完成的文件。" % len(paths))
+        if self.self_test:
+            return
+        if messagebox.askyesno(
+                "是否清理本次下载的文件",
+                "本次下载新建了 %d 个文件。\n\n"
+                "建议保留：再次下载时会自动跳过这些已校验完成的文件，不用重新下载。\n\n"
+                "要现在删除它们吗？（此前已存在的文件不会被删）" % len(paths),
+                default=messagebox.NO):
+            self._cleanup_created()
 
     def _action_text(self) -> str:
         index = self.notebook.index(self.notebook.select())
@@ -1175,7 +1201,12 @@ class App:
             loader = self._loader_key()
             loader_version = self._resolve_loader_version(loader, game, self.var_loader_version.get()) \
                 if loader != "none" else None
+            desired_name = self.var_version_name.get().strip().strip('"').strip()
+            if desired_name and re.search(r'[<>:"/\\|?*]', desired_name):
+                messagebox.showwarning("版本名称无效", "版本名不能包含 \\ / : * ? \" < > | 这些字符。")
+                return
             job = {"kind": "version", "game": game, "loader": loader, "loader_version": loader_version,
+                   "version_name": desired_name or None,
                    "fabric_api": self._fabric_api_choice(game) if loader == "fabric" else None}
 
         raw = self._dir_value()
@@ -1284,6 +1315,18 @@ class App:
                         api = mods.install_fabric_api(game, mods_dir, job.get("fabric_api"), reporter=reporter)
                         result["fabric_api"] = api["fabric_api"]
 
+            wanted = job.get("version_name")
+            if job.get("kind") == "version" and wanted:
+                base_id = result.get("id") or result.get("version")
+                if base_id and wanted != base_id:
+                    try:
+                        vanilla.rename_version(options["game_dir"], base_id, wanted)
+                        self._emit(("log", "版本已重命名：%s → %s" % (base_id, wanted)))
+                        result["renamed_from"] = base_id
+                        result["id"] = wanted
+                    except Exception as exc:  # noqa: BLE001 - 改名失败不影响已下载内容
+                        self._emit(("log", "重命名失败，保留原名 %s：%s" % (base_id, exc)))
+
             result["bytes"] = reporter.total_bytes
             result["files"] = reporter.done_files
             self._emit(("log", "完成。"))
@@ -1368,6 +1411,7 @@ class App:
                 return
             self.lbl_status.configure(text="失败")
             messagebox.showerror("下载失败", result["error"])
+            self._offer_cleanup_after_failure()
             return
         self._complete_progress()
         self.lbl_status.configure(text="完成")

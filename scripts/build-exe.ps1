@@ -48,6 +48,7 @@ Write-Host "==> 打包 $name" -ForegroundColor Cyan
 $env:PYTHONPATH = $lib
 $env:PYINSTALLER_CONFIG_DIR = Join-Path $BuildDir 'pyi-cache'
 & $venvPython -m PyInstaller --onefile --noconfirm --name $name @mode `
+    --icon (Join-Path $repo 'packaging\icon.ico') `
     --paths $repo `
     --distpath (Join-Path $BuildDir 'dist') `
     --workpath (Join-Path $BuildDir "work-$name") `

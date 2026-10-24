@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import time
 import zipfile
@@ -54,6 +55,43 @@ def load_local_version(game_dir: str, version_id: str) -> Optional[dict]:
         return None
     with open(path, "r", encoding="utf-8") as handle:
         return json.load(handle)
+
+
+def rename_version(game_dir: str, old_id: str, new_id: str) -> str:
+    """把已装好的版本改名为 new_id（目录、json 文件名、json 里的 id、jar 名一起改）。
+
+    启动器要求 “版本目录名 == json 里的 id”，所以这三处必须一起改。
+    """
+    old_id = (old_id or "").strip()
+    new_id = (new_id or "").strip()
+    if not old_id or not new_id:
+        raise InstallError("版本名不能为空")
+    if old_id == new_id:
+        return version_dir(game_dir, old_id)
+    if re.search(r'[<>:"/\\|?*]', new_id) or new_id in (".", ".."):
+        raise InstallError("版本名不能包含 \\ / : * ? \" < > | 这些字符")
+    old_dir = version_dir(game_dir, old_id)
+    new_dir = version_dir(game_dir, new_id)
+    if not os.path.isdir(old_dir):
+        raise InstallError("找不到要改名的版本目录：%s" % old_dir)
+    if os.path.exists(new_dir):
+        raise InstallError("目标版本名已存在：%s" % new_id)
+
+    os.rename(old_dir, new_dir)
+
+    old_json = os.path.join(new_dir, old_id + ".json")
+    if os.path.exists(old_json):
+        with open(old_json, "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+        data["id"] = new_id
+        with open(os.path.join(new_dir, new_id + ".json"), "w", encoding="utf-8") as handle:
+            json.dump(data, handle, ensure_ascii=False, indent=2)
+        os.remove(old_json)
+
+    old_jar = os.path.join(new_dir, old_id + ".jar")
+    if os.path.exists(old_jar):
+        os.replace(old_jar, os.path.join(new_dir, new_id + ".jar"))
+    return new_dir
 
 
 def write_version_json(game_dir: str, version_id: str, data: dict) -> str:
