@@ -13,7 +13,8 @@
 | `MCD-GUI-win64.zip` | **最稳**：onedir 结构，运行时不解压任何东西 |
 | `MCD-GUI-portable.exe` | 单文件，但解压目录是**自己所在的文件夹**，不碰 `%TEMP%` |
 | `MCD-GUI.exe` | 单文件，解压到 `%TEMP%`；部分机器上会被安全策略拦截（见下方 FAQ） |
-| `MCD.exe` | 命令行版 |
+
+> 命令行版不再提供 exe；需要 CLI 时从源码运行 `python -m mcd`。
 
 解压后双击 `MCD-GUI.exe` 即开窗口：左边选版本、右边选加载器，底部设目录/下载源，点“开始下载”。
 
@@ -171,12 +172,25 @@ mcd install 1.20.1 --loader fabric
 
 ## 从源码打包 exe
 
-```bash
-pip install pyinstaller
-pyinstaller --onefile --console --name mcd --paths . tools/mcd_entry.py
+默认只出图形界面版；命令行版直接 `python -m mcd` 运行即可。
+
+```powershell
+# Windows：一条命令出 GUI 版（内含 PyInstaller 依赖的获取与签名）
+powershell -ExecutionPolicy Bypass -File scripts\build-exe.ps1
 ```
 
-产物在 `dist/MCD.exe`（Windows）/ `dist/MCD`（Linux、macOS）。约 8.6 MB，运行时自解压到临时目录。
+手动打包：
+
+```bash
+pip install pyinstaller
+pyinstaller --onefile --windowed --icon packaging/icon.ico --name MCD-GUI --paths . tools/gui_entry.py
+```
+
+产物在 `dist/MCD-GUI.exe`（Windows）。需要 CLI 的 exe 时，加 `-Cli`：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\build-exe.ps1 -Cli
+```
 
 ## 落盘结构
 
@@ -239,9 +253,9 @@ python -m unittest discover -s tests -v
 | `install 1.20.1 --loader forge` | ✅ `1.20.1-forge-47.4.10`，Java 17 跑完 installer 并产出补丁 client jar |
 | `modpack fabulously-optimized` | ✅ MC 26.2 + Fabric 0.19.5，51 个文件 + 57 个 overrides |
 | NeoForge 版本解析 | ✅ 1.21.1→`21.1.264`，26.3→`26.3.0.94`（新旧两套版本号都支持） |
-| NeoForge 完整安装 | ❌ 本机失败：`maven.neoforged.net` 不可达，且 BMCLAPI 只代理部分 `net.neoforged` 制品（其余 403） |
+| NeoForge 完整安装 | ✅ `neoforge-21.1.264`，installer 跑完 processors（需把 UA 换成不含网址的写法，否则 BMCLAPI 返回 403；限流时自动退避） |
 
-打包后的 `MCD.exe` 同样实测过：`--version`、`list`、`install 1.0`（11 文件 / 4.6 MB）全部正常。
+CLI 版不单独出 exe，实测用源码运行同样正常：`python -m mcd --version`、`list`、`install 1.0`（11 文件 / 4.6 MB）。
 
 ## 目录
 
@@ -263,8 +277,8 @@ tests/          28 个单元测试
 * 下载源策略、镜像路径与目录布局参考了 [PCL](https://github.com/Meloong-Git/PCL) 的实现，代码为独立编写。
 * 仅下载用户有权使用的文件；请遵守 Mojang 的 EULA 与各加载器/整合包的分发许可。
 * Forge 的版本 JSON 里带有“请勿自动化下载”的提示。本项目只是调用官方 installer 与官方 maven，如你认同该提示，请通过 <https://www.patreon.com/LexManos/> 支持 Forge，或手动安装。
-* 发布的 `MCD.exe` 没有商业代码签名证书，首次运行可能提示“未知发布者 / Windows 已保护你的电脑”：
-  这是缺少证书的正常现象，不是文件有问题。可核对 release 里的 SHA256，或从源码运行（`python -m mcd`）。
+* 发布的 exe 使用自签名证书（`CN=Cantabile`），未导入该证书的机器首次运行可能提示“未知发布者 / Windows 已保护你的电脑”：
+  这是缺少商业证书的正常现象，不是文件有问题。可核对 release 里的 SHA256，或从源码运行（`python -m mcd` / `python -m mcd.gui`）。
   想在本机消除提示，可自行生成自签名证书签名（见仓库外的 `scripts/sign-exe.ps1` 思路），
   或申请真证书 / 开源项目免费签名（SignPath）。
 * 单文件 exe 启动时会把自身解压到 `%TEMP%`。若临时目录不可写，或安全软件拦截“未签名程序在临时目录

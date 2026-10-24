@@ -1,6 +1,6 @@
-﻿﻿<#
+﻿<#
 .SYNOPSIS
-    构建 MCD 的可执行文件（PyInstaller）。默认构建命令行版，加 -Gui 构建图形界面版。
+    构建 MCD 的可执行文件（PyInstaller）。默认只构建图形界面版；加 -Cli 才构建命令行版。
 
 .DESCRIPTION
     pip 在受限网络里可能卡住，所以依赖改为“直接抓 wheel 再解包”的方式获取；
@@ -8,26 +8,26 @@
 
 .EXAMPLE
     powershell -ExecutionPolicy Bypass -File scripts\build-exe.ps1
-    powershell -ExecutionPolicy Bypass -File scripts\build-exe.ps1 -Gui
+    powershell -ExecutionPolicy Bypass -File scripts\build-exe.ps1 -Cli
 #>
 param(
     [string]$BuildDir = 'F:\DSH-WORK\.build',
     [string]$Python = 'python',
     [string]$OutDir = 'F:\DSH-WORK\dist',
-    [switch]$Gui
+    [switch]$Cli
 )
 
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
 
-if ($Gui) {
-    $entry = Join-Path $repo 'tools\gui_entry.py'
-    $name = 'MCD-GUI'
-    $mode = @('--windowed')
-} else {
+if ($Cli) {
     $entry = Join-Path $repo 'tools\mcd_entry.py'
     $name = 'MCD'
     $mode = @('--console')
+} else {
+    $entry = Join-Path $repo 'tools\gui_entry.py'
+    $name = 'MCD-GUI'
+    $mode = @('--windowed')
 }
 
 $venv = Join-Path $BuildDir 'venv'

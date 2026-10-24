@@ -1,7 +1,7 @@
 name: build
 
 # 从源码出包（SignPath 对开源项目签名的硬性要求：产物必须可验证地构建自源码）。
-# 三个产物：单文件 CLI、单文件 GUI、onedir GUI（zip，运行时不解压到 %TEMP%）。
+# 两个产物：单文件 GUI、onedir GUI（zip，运行时不解压到 %TEMP%）。CLI 版不再出 exe。
 # 全部以 artifact 形式上传，不进 Release；发版时人工确认后再附加。
 
 on:
@@ -21,9 +21,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: MCD
-            entry: tools/mcd_entry.py
-            mode: --onefile --console
           - name: MCD-GUI
             entry: tools/gui_entry.py
             mode: --onefile --windowed
@@ -52,10 +49,6 @@ jobs:
           --distpath dist
           --workpath build/${{ matrix.name }}
           ${{ matrix.entry }}
-
-      - name: Smoke test (CLI only)
-        if: matrix.name == 'MCD'
-        run: .\dist\MCD.exe --version
 
       - name: Package and checksum
         shell: pwsh

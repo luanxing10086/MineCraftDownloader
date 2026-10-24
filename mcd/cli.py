@@ -255,7 +255,7 @@ def _print_welcome(parser: argparse.ArgumentParser) -> None:
     print("  mcd install 1.20.1 --loader fabric --mirror bmclapi")
     print("  mcd modpack fabulously-optimized --dir .\\fo --mirror bmclapi")
     print()
-    print("提示：在开始菜单搜索 PowerShell，cd 到本文件所在目录后运行，例如 .\\MCD.exe doctor")
+    print("提示：在仓库目录下用 python -m mcd <命令> 运行，例如 python -m mcd doctor")
     try:
         if sys.stdin and sys.stdin.isatty():
             input("按回车键退出...")
