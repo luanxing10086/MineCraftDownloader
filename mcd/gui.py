@@ -14,6 +14,7 @@ import queue
 import re
 import sys
 import threading
+import time
 import traceback
 import webbrowser
 from typing import Dict, List, Optional, Tuple
@@ -322,10 +323,12 @@ class App:
 
         self.root.title(APP_TITLE)
         icon.window_icon(self.root)
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close_request)
         self._apply_dpi_scale()
         self.root.minsize(int(940 * self.scale), int(720 * self.scale))
         self._init_style()
         self._build_ui()
+        self._bind_progress_reset()
         if self.dir_warning:
             self._append_log(self.dir_warning)
 
@@ -443,15 +446,16 @@ class App:
                                                  state="readonly", values=[AUTO_LATEST])
         self.combo_loader_version.pack(side="left", padx=(6, 16))
 
-        self.fabric_frame = ttk.Frame(loader)
+        # Fabric API 与“加载器版本”同一行，只在 Fabric 时显示
+        self.fabric_frame = ttk.Frame(row)
         self.var_fabric_api = tk.BooleanVar(value=False)
-        self.chk_fabric_api = ttk.Checkbutton(self.fabric_frame, text="同时安装 Fabric API",
+        self.chk_fabric_api = ttk.Checkbutton(self.fabric_frame, text="安装 Fabric API",
                                               variable=self.var_fabric_api,
                                               command=self._on_fabric_api_toggle)
         self.chk_fabric_api.pack(side="left")
         self.var_fabric_api_version = tk.StringVar(value="最新")
         self.combo_fabric_api = ttk.Combobox(self.fabric_frame, textvariable=self.var_fabric_api_version,
-                                             width=22, state="disabled", values=["最新"])
+                                             width=18, state="disabled", values=["最新"])
         self.combo_fabric_api.pack(side="left", padx=6)
 
         name_row = ttk.Frame(loader)
@@ -580,6 +584,8 @@ class App:
         ttk.Label(line3, text="并发").pack(side="left", padx=(8, 0))
         self.var_threads = tk.IntVar(value=int(self.settings.get("threads") or 8))
         ttk.Spinbox(line3, from_=1, to=32, width=4, textvariable=self.var_threads).pack(side="left", padx=4)
+        ttk.Label(line3, text="（同时下载的文件数：8 较稳，网络差或镜像限流时降到 2–4）",
+                  style="Hint.TLabel").pack(side="left")
 
         self.lbl_iso_hint = ttk.Label(box, text="", style="Hint.TLabel", justify="left")
         self.lbl_iso_hint.pack(anchor="w", pady=(4, 0))
@@ -674,6 +680,80 @@ class App:
             self.btn_cancel.pack(side="right", padx=(0, 6))
         else:
             self.btn_cancel.pack_forget()
+        self._apply_lock(busy)
+
+    def _lockable_widgets(self) -> List[tk.Widget]:
+        """下载过程中需要锁定的可交互控件（保留“取消”可用）。"""
+        skip = {id(self.btn_start), id(self.btn_cancel)}
+        out: List[tk.Widget] = []
+        stack = [self.root]
+        while stack:
+            widget = stack.pop()
+            for child in widget.winfo_children():
+                stack.append(child)
+                if id(child) in skip:
+                    continue
+                if isinstance(child, (ttk.Entry, ttk.Combobox, ttk.Button, ttk.Checkbutton,
+                                      ttk.Radiobutton, ttk.Spinbox, ttk.Treeview)):
+                    out.append(child)
+        return out
+
+    def _apply_lock(self, busy: bool) -> None:
+        """下载中禁用所有设置项，结束后恢复原来的可用状态。"""
+        if busy:
+            self._locked = []
+            for widget in self._lockable_widgets():
+                try:
+                    if isinstance(widget, ttk.Treeview):
+                        self._locked.append((widget, "tree", list(widget.state())))
+                        widget.state(["disabled"])
+                    else:
+                        previous = str(widget.cget("state"))
+                        self._locked.append((widget, "cfg", previous))
+                        widget.configure(state="disabled")
+                except tk.TclError:
+                    continue
+        else:
+            for widget, kind, previous in getattr(self, "_locked", []):
+                try:
+                    if kind == "tree":
+                        # 空元组直接传回去会被当成“没有状态变更”，导致一直 disabled
+                        if "disabled" in previous:
+                            widget.state(["disabled"])
+                        else:
+                            widget.state(["!disabled"])
+                    else:
+                        widget.configure(state=previous)
+                except tk.TclError:
+                    continue
+            self._locked = []
+
+    def _bind_progress_reset(self) -> None:
+        """任何配置项改动后，把进度条重置回初始状态。"""
+        for name in ("var_type", "var_search", "var_loader", "var_loader_version",
+                     "var_fabric_api", "var_fabric_api_version", "var_version_name",
+                     "var_dir", "var_mirror", "var_custom_source", "var_isolate",
+                     "var_skip_assets", "var_threads", "var_pack", "var_custom_url",
+                     "var_custom_dest", "var_custom_name"):
+            var = getattr(self, name, None)
+            if var is None:
+                continue
+            try:
+                var.trace_add("write", self._on_config_changed)
+            except Exception:  # noqa: BLE001
+                continue
+        try:
+            self.tree.bind("<<TreeviewSelect>>", self._on_config_changed, add="+")
+        except tk.TclError:
+            pass
+
+    def _on_config_changed(self, *_args) -> None:
+        if self.busy:
+            return
+        if hasattr(self, "progress_file"):
+            self._reset_progress()
+        if hasattr(self, "lbl_status"):
+            self.lbl_status.configure(text="就绪")
 
     def _cancel(self) -> None:
         if not self.busy:
@@ -681,6 +761,39 @@ class App:
         self.btn_cancel.configure(state="disabled", text="正在取消…")
         self._append_log("已请求取消，等待当前文件结束…")
         request_cancel()
+
+    def _on_close_request(self) -> None:
+        """点窗口关闭：下载中先问是否继续，选择停止后再问是否删除已下载文件。"""
+        if not self.busy:
+            self.root.destroy()
+            return
+        if self.self_test:
+            self.root.destroy()
+            return
+        keep = messagebox.askyesno(
+            "正在下载",
+            "下载还没有完成。\n\n要继续下载吗？\n\n选择“否”会停止下载并关闭窗口。",
+            default=messagebox.YES)
+        if keep:
+            return
+
+        self._pending_close = True
+        request_cancel()
+        self._append_log("正在停止下载，等当前文件结束…")
+        deadline = time.time() + 20
+        while self.busy and time.time() < deadline:
+            self.root.update()
+            time.sleep(0.05)
+        self._pending_close = False
+
+        if created_files():
+            if messagebox.askyesno(
+                    "删除已下载的文件",
+                    "本次已经下载了一部分文件。\n\n要删除它们吗？\n"
+                    "（此前已存在的文件不会被删；保留下来的文件下次会跳过）",
+                    default=messagebox.NO):
+                self._cleanup_created()
+        self.root.destroy()
 
     def _cleanup_created(self) -> None:
         """取消后删掉本次下载新建的文件；此前已存在的文件一律不动。"""
@@ -1025,7 +1138,7 @@ class App:
         self.combo_loader_version.configure(values=[AUTO_LATEST], state="readonly")
 
         if key == "fabric":
-            self.fabric_frame.pack(fill="x", pady=(6, 0))
+            self.fabric_frame.pack(side="left")
         else:
             self.fabric_frame.pack_forget()
             self.var_fabric_api.set(False)
@@ -1406,7 +1519,8 @@ class App:
             self._reset_progress()
             if "取消" in str(result["error"]):
                 self.lbl_status.configure(text="已取消")
-                self._cleanup_created()
+                if not getattr(self, "_pending_close", False):
+                    self._cleanup_created()
                 self._append_log("已取消。")
                 return
             self.lbl_status.configure(text="失败")
