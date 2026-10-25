@@ -110,9 +110,22 @@ powershell -ExecutionPolicy Bypass -File scripts\build-msix.ps1 -InputDir <onedi
 
 ## 环境要求
 
+### 直接用发布版 exe（推荐）
+
+| 依赖 | 是否需要 | 说明 |
+|---|---|---|
+| Windows | ✅ 需要 | Windows 10 1809+ / Windows 11，x64 |
+| **Python** | ❌ **不需要** | 解释器已打包进程序：`python311.dll`（5.5 MB）、`base_library.zip`、标准库都在里面 |
+| **Java** | ⚠️ 仅安装 Forge / NeoForge 时需要 | 需要 Java 17 或 21；下载原版、Fabric、Quilt、整合包都**不需要** Java |
+| VC++ 运行库 | ❌ 不需要 | 已随包附带 `VCRUNTIME140.dll` |
+| 其他 Python 包 | ❌ 不需要 | 界面与下载链路只用 Python 标准库，没有 `pip install` 步骤 |
+
+也就是说：**下载即用，不用装 Python，也不用装 Java**（除非你要装 Forge / NeoForge）。
+
+### 从源码运行 / 自行打包
+
 * Python 3.8+（Windows 上建议 3.9 及以上）
-* 仅 Forge / NeoForge 安装需要 Java（17 或 21，脚本会自动挑一个合适的）
-* 不需要 `pip install` 任何东西
+* 自行打包 exe 需要 PyInstaller（`scripts/build-exe.ps1` 会自动获取）
 
 ## 快速开始
 
@@ -230,7 +243,7 @@ minecraft/
 
 ## 已知限制
 
-* **NeoForge 需要能访问 `maven.neoforged.net`**：installer 下载本身可以走镜像，但 installer 运行时会直连该 maven；本工具会先用 `--mirror` 预取 `install_profile.json` 里的依赖，不过 BMCLAPI 对 `net.neoforged.*` 只代理了一部分（其余返回 403）。受限网络请配 `--proxy` 或使用全局代理。
+* **NeoForge 需要能访问 `maven.neoforged.net`**：installer 运行时会直连该 maven，所以本工具会先用镜像预取 `install_profile.json` 里的依赖，让 installer 尽量只做本地处理。BMCLAPI 的 `/maven` 会 302 到教育网镜像，通常可直连；遇到 429/403 会自动退避，仍失败时可配 `--proxy`。
 * Forge / NeoForge 的 installer 由官方提供，其内部下载不走 `--mirror`；`--mirror` 模式会先预取依赖，让 installer 尽量只做本地处理。
 * Forge installer 在“Injecting profile”阶段偶尔会失败并把 `launcher_profiles.json` 截断；此时版本 JSON 与补丁后的 jar 其实已经写好，本工具会容错继续，并修复该文件。
 * NeoForge 版本号会自动匹配：`1.21.1 → 21.1.x`（旧体系）、`26.3 → 26.3.x.y`（新体系）。
