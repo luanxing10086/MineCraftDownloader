@@ -3,14 +3,19 @@
 from __future__ import annotations
 
 import hashlib
+import http.client
+import io
 import json
 import os
+import ssl
 import sys
 import threading
 import time
+import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, Iterable, List, Optional, Sequence
+from urllib.parse import urljoin, urlsplit
 
 USER_AGENT = "MCD/0.1 (Minecraft downloader)"
 CHUNK = 256 * 1024
@@ -28,6 +33,34 @@ class DownloadCancelled(DownloadError):
 _CANCEL = threading.Event()
 _CREATED: "set[str]" = set()
 _CREATED_LOCK = threading.Lock()
+
+# 自适应并发：遇 429/403 就把并发减半，连续成功后慢慢加回来
+_ADAPT = {"base": 8, "cap": 8}
+_ADAPT_LOCK = threading.Lock()
+
+
+def _cap_for(base: int) -> int:
+    with _ADAPT_LOCK:
+        if _ADAPT["base"] != base:
+            _ADAPT["base"] = base
+            _ADAPT["cap"] = base
+        return max(1, min(base, _ADAPT["cap"]))
+
+
+def _note_throttled() -> None:
+    with _ADAPT_LOCK:
+        _ADAPT["cap"] = max(2, _ADAPT["cap"] // 2)
+
+
+def _note_batch_ok() -> None:
+    with _ADAPT_LOCK:
+        if _ADAPT["cap"] < _ADAPT["base"]:
+            _ADAPT["cap"] += 1
+
+
+def current_concurrency(configured: int) -> int:
+    """给 UI / 日志用：当前实际使用的并发数。"""
+    return _cap_for(configured)
 
 
 def reset_created() -> None:
@@ -76,13 +109,157 @@ def current_proxy() -> Optional[str]:
     return None
 
 
+_TLS_CONTEXT = ssl.create_default_context()
+_TLS_LOCAL = threading.local()
+_SSL_LOCK = threading.Lock()
+
+
+def _thread_pool() -> Dict[tuple, http.client.HTTPConnection]:
+    pool = getattr(_TLS_LOCAL, "pool", None)
+    if pool is None:
+        pool = _TLS_LOCAL.pool = {}
+    return pool
+
+
+class _KeepAliveResponse:
+    """把 http.client 的响应包成和 urllib 一样好用的上下文管理器，并在读完后归还连接。"""
+
+    def __init__(self, conn, response, pool, key, url):
+        self._conn = conn
+        self._response = response
+        self._pool = pool
+        self._key = key
+        self._url = url
+        self._complete = False
+        self._closed = False
+
+    @property
+    def headers(self):
+        return self._response.headers
+
+    def read(self, amount: int = -1) -> bytes:
+        # 没有 Content-Length 时不能直接用 read(-1)：keep-alive 连接不会 EOF，会一直阻塞
+        if amount is None or amount < 0:
+            pieces = []
+            while True:
+                piece = self._response.read(CHUNK)
+                if not piece:
+                    break
+                pieces.append(piece)
+            self._complete = True
+            return b"".join(pieces)
+        data = self._response.read(amount)
+        if not data:
+            self._complete = True
+        return data
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        # 只复用“长度已知且已读完”的响应；chunked / 未知长度一律关掉，避免连接状态错乱
+        length_known = (getattr(self._response, "length", None) is not None
+                        and not getattr(self._response, "chunked", False))
+        reusable = self._complete and not self._response.will_close and length_known
+        if reusable:
+            self._pool[self._key] = (time.time(), self._conn)
+        else:
+            try:
+                self._conn.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.close()
+        return False
+
+
+def _request_keepalive(url: str, proxy: Optional[str], timeout: int, redirects: int = 0):
+    """用线程内的连接池发 GET；同 host 复用连接，省掉每次 240ms 的 TLS 握手。"""
+    parts = urlsplit(url)
+    scheme = (parts.scheme or "https").lower()
+    host = parts.hostname
+    if not host:
+        raise ValueError("非法 URL: %s" % url)
+    port = parts.port or (443 if scheme == "https" else 80)
+    path = (parts.path or "/") + (("?" + parts.query) if parts.query else "")
+    key = (scheme, host, port)
+    pool = _thread_pool()
+
+    for attempt in (0, 1):
+        entry = pool.pop(key, None)
+        conn = None
+        if entry is not None:
+            cached_at, cached = entry
+            if time.time() - cached_at < 45:
+                conn = cached
+            else:
+                try:
+                    cached.close()
+                except Exception:  # noqa: BLE001
+                    pass
+        if conn is None:
+            if scheme == "https":
+                with _SSL_LOCK:
+                    conn = http.client.HTTPSConnection(host, port, timeout=timeout, context=_TLS_CONTEXT)
+            else:
+                conn = http.client.HTTPConnection(host, port, timeout=timeout)
+        try:
+            conn.request("GET", path, headers={
+                "User-Agent": USER_AGENT,
+                "Accept": "*/*",
+                "Connection": "keep-alive",
+            })
+            response = conn.getresponse()
+            if response.status in (301, 302, 303, 307, 308):
+                location = response.getheader("Location")
+                try:
+                    while response.read(CHUNK):
+                        pass
+                except Exception:  # noqa: BLE001
+                    pass
+                if not location or redirects >= 5:
+                    conn.close()
+                    raise DownloadError("重定向次数过多：%s" % url)
+                target = urljoin(url, location)
+                if urlsplit(target).hostname == host and not response.will_close:
+                    # 同主机跳转：连接还能用，放回池里省一次 TLS
+                    pool[key] = (time.time(), conn)
+                else:
+                    conn.close()
+                return _request_keepalive(target, proxy, timeout, redirects + 1)
+            if response.status >= 400:
+                body = response.read()
+                conn.close()
+                raise urllib.error.HTTPError(url, response.status, response.reason, response.headers,
+                                             io.BytesIO(body))
+            return _KeepAliveResponse(conn, response, pool, key, url)
+        except urllib.error.HTTPError:
+            raise
+        except Exception:
+            try:
+                conn.close()
+            except Exception:  # noqa: BLE001
+                pass
+            if attempt == 1:
+                raise
+    raise DownloadError("请求失败：%s" % url)
+
+
 def open_url(url: str, proxy: Optional[str] = None, timeout: int = TIMEOUT):
-    request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-    handlers = []
-    if proxy:
-        handlers.append(urllib.request.ProxyHandler({"http": proxy, "https": proxy}))
-    opener = urllib.request.build_opener(*handlers)
-    return opener.open(request, timeout=timeout)
+    scheme = urlsplit(url).scheme.lower()
+    if proxy or scheme not in ("http", "https"):
+        # 代理 / file: 等非 HTTP 场景交回 urllib
+        request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+        handlers = []
+        if proxy:
+            handlers.append(urllib.request.ProxyHandler({"http": proxy, "https": proxy}))
+        opener = urllib.request.build_opener(*handlers)
+        return opener.open(request, timeout=timeout)
+    return _request_keepalive(url, proxy, timeout)
 
 
 def fetch_bytes(urls: Sequence[str], proxy: Optional[str] = None, timeout: int = TIMEOUT) -> bytes:
@@ -259,6 +436,7 @@ def download(
                     except Exception:  # noqa: BLE001
                         retry_after = None
                     rate_limited = True
+                    _note_throttled()
                     if retry_after and str(retry_after).isdigit():
                         next_wait = max(next_wait, min(int(retry_after), 60))
                 try:
@@ -318,16 +496,22 @@ def download_many(
         except Exception as exc:  # noqa: BLE001 - 汇总后统一报告
             return "%s: %s" % (task.get("label") or task["dest"], exc)
 
-    if threads <= 1:
+    workers = _cap_for(threads)
+    if workers <= 1:
         for task in tasks:
             error = worker(task)
             if error:
                 failures.append(error)
     else:
-        with ThreadPoolExecutor(max_workers=max(1, threads)) as pool:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
             for error in pool.map(worker, tasks):
                 if error:
                     failures.append(error)
+    if failures:
+        if any(("429" in item) or ("403" in item) for item in failures):
+            _note_throttled()
+    else:
+        _note_batch_ok()
     if reporter:
         reporter.flush()
     return failures

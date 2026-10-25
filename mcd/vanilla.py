@@ -23,7 +23,7 @@ import zipfile
 from typing import Dict, List, Optional
 
 from .mirror import Mirror
-from .net import DownloadError, Reporter, download, download_many, fetch_json
+from .net import DownloadError, Reporter, download, download_many, fetch_json, open_url
 from .rules import Context, allowed, maven_path, native_classifier
 
 MANIFEST_OFFICIAL = "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json"
@@ -276,18 +276,36 @@ def install_assets(
         index = json.load(handle)
 
     objects = index.get("objects") or {}
+
+    # BMCLAPI 的 /assets 会 302 到境外节点（实测 0.3 文件/秒），官方源是 9 文件/秒。
+    # 先探测一次官方源是否可用，可用就把它排在前面，不通再退回镜像。
+    official_first = False
+    if mirror.is_mirror and objects:
+        probe_hash = next(iter(objects.values()))["hash"]
+        probe_url = "%s/%s/%s" % (ASSET_BASE, probe_hash[:2], probe_hash)
+        try:
+            with open_url(probe_url, proxy=proxy, timeout=8) as response:
+                response.read(1)
+            official_first = True
+        except Exception:  # noqa: BLE001 - 探测失败就用镜像
+            official_first = False
+
     tasks = []
     for name, info in objects.items():
         digest = info["hash"]
+        official_url = "%s/%s/%s" % (ASSET_BASE, digest[:2], digest)
+        urls = mirror.urls(official_url)
+        if official_first:
+            urls = [official_url] + [item for item in urls if item != official_url]
         tasks.append({
             "dest": os.path.join(game_dir, "assets", "objects", digest[:2], digest),
-            "urls": mirror.urls("%s/%s/%s" % (ASSET_BASE, digest[:2], digest)),
+            "urls": urls,
             "sha1": digest,
             "size": info.get("size"),
             "label": "objects/" + digest[:8],
         })
 
-    failures = download_many(tasks, proxy=proxy, threads=max(threads, 8), reporter=reporter)
+    failures = download_many(tasks, proxy=proxy, threads=max(threads, 16), reporter=reporter)
     if failures:
         raise InstallError("资源下载失败：\n  " + "\n  ".join(failures[:5]))
 
@@ -359,7 +377,17 @@ def install(
 
     manifest = manifest or load_manifest(game_dir, mirror, proxy=proxy)
     entry = find_version_entry(manifest, version_id)
-    version = fetch_json(mirror.version_json_urls(version_id, entry["url"]), proxy=proxy)
+    version_urls = mirror.version_json_urls(version_id, entry["url"])
+    if mirror.is_mirror:
+        # 镜像的 /version/<id>/json 会 302 到境外节点（实测 ~3s），官方通常更快
+        official = entry["url"]
+        try:
+            with open_url(official, proxy=proxy, timeout=8) as response:
+                response.read(1)
+            version_urls = [official] + [item for item in version_urls if item != official]
+        except Exception:  # noqa: BLE001 - 不通就继续用镜像
+            pass
+    version = fetch_json(version_urls, proxy=proxy)
     version["id"] = version.get("id") or version_id
 
     written = write_version_json(game_dir, version_id, version)
