@@ -271,6 +271,9 @@ class GuiReporter:
                                                  label, human_size(size))))
         self._emit(("total", self._overall()))
 
+    def note(self, text: str) -> None:
+        self._emit(("log", "! " + text))
+
     def skipped(self, size: int) -> None:
         self.done_files += 1
         self.done_bytes += int(size or 0)
@@ -486,6 +489,22 @@ class App:
 
         ttk.Label(box, text="示例：fabulously-optimized、fabulously-optimized@14.1.1、"
                             "https://modrinth.com/modpack/xxx", style="Hint.TLabel").pack(anchor="w")
+
+        pack_name_row = ttk.Frame(box)
+        pack_name_row.pack(fill="x", pady=(6, 8))
+        ttk.Label(pack_name_row, text="版本名称").pack(side="left")
+        self.var_pack_name = tk.StringVar(value="")
+        ttk.Entry(pack_name_row, textvariable=self.var_pack_name, width=32).pack(side="left", padx=6)
+        ttk.Label(pack_name_row, text="留空则用整合包自带的版本名；可自定义，装完会把版本目录一起改名",
+                  style="Hint.TLabel").pack(side="left")
+
+        proxy_row = ttk.Frame(box)
+        proxy_row.pack(fill="x", pady=(0, 8))
+        ttk.Label(proxy_row, text="代理").pack(side="left")
+        self.var_pack_proxy = tk.StringVar(value=str(self.settings.get("pack_proxy") or ""))
+        ttk.Entry(proxy_row, textvariable=self.var_pack_proxy, width=32).pack(side="left", padx=6)
+        ttk.Label(proxy_row, text="如 http://127.0.0.1:7890，留空直连；Modrinth 的 CDN 国内常被限速，有代理会快很多",
+                  style="Hint.TLabel").pack(side="left")
 
         reason = (
             "为什么不支持 CurseForge 整合包：\n"
@@ -733,7 +752,7 @@ class App:
         for name in ("var_type", "var_search", "var_loader", "var_loader_version",
                      "var_fabric_api", "var_fabric_api_version", "var_version_name",
                      "var_dir", "var_mirror", "var_custom_source", "var_isolate",
-                     "var_skip_assets", "var_threads", "var_pack", "var_custom_url",
+                     "var_skip_assets", "var_threads", "var_pack", "var_pack_name", "var_pack_proxy", "var_custom_url",
                      "var_custom_dest", "var_custom_name"):
             var = getattr(self, name, None)
             if var is None:
@@ -1305,7 +1324,12 @@ class App:
             if not source:
                 messagebox.showwarning("缺少整合包", "请填写 Modrinth 项目 slug / 链接，或选择 .mrpack 文件。")
                 return
-            job = {"kind": "pack", "source": source}
+            pack_name = self.var_pack_name.get().strip().strip('"').strip()
+            if pack_name and re.search(r'[<>:"/\\|?*]', pack_name):
+                messagebox.showwarning("版本名称无效", "版本名不能包含 \\ / : * ? \" < > | 这些字符。")
+                return
+            job = {"kind": "pack", "source": source, "version_name": pack_name or None,
+                   "proxy": self.var_pack_proxy.get().strip() or None}
         else:
             game = self._selected_version()
             if not game:
@@ -1382,6 +1406,9 @@ class App:
             self.settings.update({"game_dir": game_dir, "mirror": self.var_mirror.get(),
                                   "threads": options["threads"],
                                   "isolate": bool(self.var_isolate.get())})
+            proxy_var = getattr(self, "var_pack_proxy", None)
+            if proxy_var is not None:
+                self.settings["pack_proxy"] = proxy_var.get().strip()
             config.save(self.settings)
         except Exception:  # noqa: BLE001
             pass
@@ -1394,6 +1421,7 @@ class App:
                 result = modpack.install(
                     job["source"], game_dir=options["game_dir"], mirror=options["mirror"],
                     threads=options["threads"], reporter=reporter, skip_assets=options["skip_assets"],
+                    proxy=job.get("proxy"),
                     content_root=None if not isolate else self._guess_pack_root(job["source"], options["game_dir"]),
                 )
             else:
@@ -1429,16 +1457,21 @@ class App:
                         result["fabric_api"] = api["fabric_api"]
 
             wanted = job.get("version_name")
-            if job.get("kind") == "version" and wanted:
+            kind = job.get("kind")
+            if kind == "pack":
+                base_id = result.get("loader_id") or result.get("id")
+            else:
                 base_id = result.get("id") or result.get("version")
-                if base_id and wanted != base_id:
-                    try:
-                        vanilla.rename_version(options["game_dir"], base_id, wanted)
-                        self._emit(("log", "版本已重命名：%s → %s" % (base_id, wanted)))
-                        result["renamed_from"] = base_id
-                        result["id"] = wanted
-                    except Exception as exc:  # noqa: BLE001 - 改名失败不影响已下载内容
-                        self._emit(("log", "重命名失败，保留原名 %s：%s" % (base_id, exc)))
+            if wanted and kind in ("version", "pack") and base_id and wanted != base_id:
+                try:
+                    vanilla.rename_version(options["game_dir"], base_id, wanted)
+                    self._emit(("log", "版本已重命名：%s → %s" % (base_id, wanted)))
+                    result["renamed_from"] = base_id
+                    result["id"] = wanted
+                    if kind == "pack":
+                        result["loader_id"] = wanted
+                except Exception as exc:  # noqa: BLE001 - 改名失败不影响已下载内容
+                    self._emit(("log", "重命名失败，保留原名 %s：%s" % (base_id, exc)))
 
             result["bytes"] = reporter.total_bytes
             result["files"] = reporter.done_files

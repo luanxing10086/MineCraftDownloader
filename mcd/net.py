@@ -7,6 +7,7 @@ import http.client
 import io
 import json
 import os
+import shutil
 import ssl
 import sys
 import threading
@@ -20,6 +21,11 @@ from urllib.parse import urljoin, urlsplit
 USER_AGENT = "MCD/0.1 (Minecraft downloader)"
 CHUNK = 256 * 1024
 TIMEOUT = 30
+SEGMENT_MIN = 6 * 1024 * 1024      # 小于这个体积不值得分段
+SEGMENT_SIZE = 3 * 1024 * 1024     # 每段目标大小（实测 3MB 一段、6 段并发最快）
+SEGMENT_MAX = 8                    # 最多拆几段
+SLOW_HINT_AFTER = 25               # 单个文件慢于这个秒数
+SLOW_HINT_SPEED = 0.35             # 且速度低于这个值（MB/s）时提示
 
 
 class DownloadError(RuntimeError):
@@ -177,7 +183,8 @@ class _KeepAliveResponse:
         return False
 
 
-def _request_keepalive(url: str, proxy: Optional[str], timeout: int, redirects: int = 0):
+def _request_keepalive(url: str, proxy: Optional[str], timeout: int, redirects: int = 0,
+                       extra_headers: Optional[Dict[str, str]] = None):
     """用线程内的连接池发 GET；同 host 复用连接，省掉每次 240ms 的 TLS 握手。"""
     parts = urlsplit(url)
     scheme = (parts.scheme or "https").lower()
@@ -208,11 +215,14 @@ def _request_keepalive(url: str, proxy: Optional[str], timeout: int, redirects: 
             else:
                 conn = http.client.HTTPConnection(host, port, timeout=timeout)
         try:
-            conn.request("GET", path, headers={
+            headers = {
                 "User-Agent": USER_AGENT,
                 "Accept": "*/*",
                 "Connection": "keep-alive",
-            })
+            }
+            if extra_headers:
+                headers.update(extra_headers)
+            conn.request("GET", path, headers=headers)
             response = conn.getresponse()
             if response.status in (301, 302, 303, 307, 308):
                 location = response.getheader("Location")
@@ -249,17 +259,21 @@ def _request_keepalive(url: str, proxy: Optional[str], timeout: int, redirects: 
     raise DownloadError("请求失败：%s" % url)
 
 
-def open_url(url: str, proxy: Optional[str] = None, timeout: int = TIMEOUT):
+def open_url(url: str, proxy: Optional[str] = None, timeout: int = TIMEOUT,
+             headers: Optional[Dict[str, str]] = None):
     scheme = urlsplit(url).scheme.lower()
+    merged = {"User-Agent": USER_AGENT}
+    if headers:
+        merged.update(headers)
     if proxy or scheme not in ("http", "https"):
         # 代理 / file: 等非 HTTP 场景交回 urllib
-        request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+        request = urllib.request.Request(url, headers=merged)
         handlers = []
         if proxy:
             handlers.append(urllib.request.ProxyHandler({"http": proxy, "https": proxy}))
         opener = urllib.request.build_opener(*handlers)
         return opener.open(request, timeout=timeout)
-    return _request_keepalive(url, proxy, timeout)
+    return _request_keepalive(url, proxy, timeout, extra_headers=headers)
 
 
 def fetch_bytes(urls: Sequence[str], proxy: Optional[str] = None, timeout: int = TIMEOUT) -> bytes:
@@ -348,6 +362,12 @@ class Reporter:
             self.skipped_files += 1
             self.done_files += 1
 
+    def note(self, text: str) -> None:
+        """附加提示（例如“这个文件下载较慢”）；默认实现不做事。"""
+        if self.enabled and not self._tty:
+            self.stream.write("  ! %s\n" % text)
+            self.stream.flush()
+
     def flush(self) -> None:
         if self.enabled and self._tty:
             with self._lock:
@@ -356,6 +376,87 @@ class Reporter:
 
 
 # ---------------------------------------------------------------- 下载实现
+
+
+def _slow_hint(speed: float) -> str:
+    return ("这个文件下载较慢（%.2f MB/s）。境外源（如 Modrinth 的 cdn.modrinth.com）"
+            "在国内常被限速；可在「整合包」页填代理地址，或稍后重试。" % speed)
+
+
+class _SegmentUnsupported(Exception):
+    """服务器不支持 Range 请求，退回单连接下载。"""
+
+
+def _download_segmented(dest: str, url: str, total: int, sha1: Optional[str],
+                        proxy: Optional[str], reporter: Optional[Reporter], label: str) -> int:
+    """把大文件拆成多段并发下载，再合并；失败会抛异常交给单连接逻辑重试。"""
+    count = min(SEGMENT_MAX, max(2, total // SEGMENT_SIZE))
+    parts = []
+    for index in range(count):
+        low = total * index // count
+        high = total * (index + 1) // count - 1
+        parts.append([low, high, "%s.seg%d" % (dest, index)])
+
+    progress = [0] * count
+    lock = threading.Lock()
+    warned = [False]
+
+    def fetch(index: int) -> None:
+        low, high, path = parts[index]
+        expected = high - low + 1
+        with open_url(url, proxy=proxy, headers={"Range": "bytes=%d-%d" % (low, high)}) as response:
+            if response.headers.get("Content-Range") is None:
+                raise _SegmentUnsupported(url)
+            started = time.time()
+            got = 0
+            with open(path, "wb") as handle:
+                while True:
+                    if _CANCEL.is_set():
+                        raise DownloadCancelled("已取消")
+                    chunk = response.read(CHUNK)
+                    if not chunk:
+                        break
+                    handle.write(chunk)
+                    got += len(chunk)
+                    with lock:
+                        progress[index] = got
+                        current = sum(progress)
+                    if reporter:
+                        reporter.progress(label, current, total)
+                    if not warned[0] and reporter is not None and hasattr(reporter, "note"):
+                        elapsed = time.time() - started
+                        if elapsed > SLOW_HINT_AFTER:
+                            speed = got / elapsed / 1048576
+                            if speed < SLOW_HINT_SPEED:
+                                warned[0] = True
+                                reporter.note(_slow_hint(speed))
+        if got != expected:
+            raise DownloadError("分段长度不符：%s（%d != %d）" % (os.path.basename(path), got, expected))
+
+    try:
+        with ThreadPoolExecutor(max_workers=count) as pool:
+            futures = [pool.submit(fetch, index) for index in range(count)]
+            for future in futures:
+                future.result()
+        part_path = dest + ".part"
+        with open(part_path, "wb") as out:
+            for _low, _high, path in parts:
+                with open(path, "rb") as handle:
+                    shutil.copyfileobj(handle, out, CHUNK)
+        if sha1 and file_sha1(part_path) != sha1:
+            try:
+                os.remove(part_path)
+            except OSError:
+                pass
+            raise DownloadError("sha1 校验失败")
+        os.replace(part_path, dest)
+        return total
+    finally:
+        for _low, _high, path in parts:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
 
 
 def download(
@@ -395,6 +496,23 @@ def download(
     errors: List[str] = []
     rate_limited = False
     next_wait = 0
+
+    # 大文件先试分段下载：单个境外大文件单连接很慢，拆成多段并发能成倍提速
+    if size and int(size) >= SEGMENT_MIN and not existed_before:
+        for url in urls:
+            try:
+                got = _download_segmented(dest, url, int(size), sha1, proxy, reporter, label)
+                _remember_created(dest)
+                if reporter:
+                    reporter.done(label, got)
+                return got
+            except DownloadCancelled:
+                raise
+            except _SegmentUnsupported:
+                break  # 该源不支持 Range，退回单连接
+            except Exception:  # noqa: BLE001 - 分段失败就走原来的重试逻辑
+                break
+
     for attempt in range(1, retries + 1):
         for url in urls:
             part = dest + ".part"
@@ -402,6 +520,8 @@ def download(
                 with open_url(url, proxy=proxy) as response, open(part, "wb") as handle:
                     total = int(response.headers.get("Content-Length") or size or 0)
                     got = 0
+                    started = time.time()
+                    hinted = False
                     while True:
                         if _CANCEL.is_set():
                             raise DownloadCancelled("已取消")
@@ -412,6 +532,13 @@ def download(
                         got += len(chunk)
                         if reporter:
                             reporter.progress(label, got, total)
+                        if not hinted and reporter is not None and hasattr(reporter, "note"):
+                            elapsed = time.time() - started
+                            if elapsed > SLOW_HINT_AFTER:
+                                speed = got / elapsed / 1048576
+                                if speed < SLOW_HINT_SPEED:
+                                    hinted = True
+                                    reporter.note(_slow_hint(speed))
                 if sha1 and file_sha1(part) != sha1:
                     raise DownloadError("sha1 校验失败")
                 os.replace(part, dest)
